@@ -1,0 +1,10 @@
+<svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="40" height="40" rx="8" fill="url(#gradient_light)"/>
+  <text x="20" y="30" font-family="system-ui, -apple-system, sans-serif" font-size="26" font-weight="700" fill="white" text-anchor="middle">9</text>
+  <defs>
+    <linearGradient id="gradient_light" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f97815"/>
+      <stop offset="1" stop-color="#c2590a"/>
+    </linearGradient>
+  </defs>
+</svg>
