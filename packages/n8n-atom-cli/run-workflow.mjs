@@ -14,6 +14,66 @@ function log(msg) {
 }
 
 /**
+ * If value is a string that parses as JSON, return the parsed value; otherwise return as-is.
+ * Used so that execution data's "data" property (often a minified JSON string) is written multi-line.
+ */
+function tryParseJson(value) {
+	if (typeof value !== 'string' || !value.trim()) {
+		return value;
+	}
+	const first = value.trim().charAt(0);
+	if (first !== '[' && first !== '{') {
+		return value;
+	}
+	try {
+		return JSON.parse(value);
+	} catch {
+		return value;
+	}
+}
+
+/**
+ * Recursively expand any property named "data" that is a JSON string into an object/array
+ * so that the final JSON file is pretty-printed with multiple lines.
+ * Replicates formatExecutionDataForFile from n8n-atom-vscodev3.
+ */
+function formatExecutionData(obj) {
+	if (obj === null || typeof obj !== 'object') {
+		return obj;
+	}
+	if (Array.isArray(obj)) {
+		return obj.map((item) => formatExecutionData(item));
+	}
+	const out = {};
+	for (const [key, val] of Object.entries(obj)) {
+		if (key === 'data' && typeof val === 'string') {
+			const parsed = tryParseJson(val);
+			out[key] =
+				typeof parsed === 'object' && parsed !== null
+					? formatExecutionData(parsed)
+					: parsed;
+		} else {
+			out[key] = formatExecutionData(val);
+		}
+	}
+	return out;
+}
+
+/**
+ * Extract and format execution data for .data file.
+ * When execution has resultData.runData (per-node run data), use that.
+ * Otherwise fall back to the full execution data object.
+ * Replicates getExecutionDataFileContent from n8n-atom-vscodev3.
+ */
+function getExecutionDataFileContent(executionData) {
+	const runData = executionData?.resultData?.runData;
+	if (runData && typeof runData === 'object' && !Array.isArray(runData)) {
+		return formatExecutionData(runData);
+	}
+	return formatExecutionData(executionData);
+}
+
+/**
  * Run an n8n workflow file.
  *
  * @param {string} filePath - Path to the .n8n workflow file
@@ -184,7 +244,20 @@ export async function runWorkflow(filePath, options = {}) {
 		}
 	}
 
-	// ── Step 5: Sync workflow back to file if server had newer version ──
+	// ── Step 5: Generate .data file ──────────────────────────────
+	if (result.data) {
+		try {
+			const dataFilePath = resolvedPath.replace(/\.n8n$/, '.data');
+			const formatted = getExecutionDataFileContent(result.data);
+			const dataContent = JSON.stringify(formatted, null, 2);
+			fs.writeFileSync(dataFilePath, dataContent, { encoding: 'utf8' });
+			log(`Data file saved to: ${dataFilePath}`);
+		} catch (dataError) {
+			log(`Warning: Failed to save .data file: ${dataError instanceof Error ? dataError.message : String(dataError)}`);
+		}
+	}
+
+	// ── Step 6: Sync workflow back to file if server had newer version ──
 	if (result.syncedWorkflow) {
 		log(`Server had a newer workflow version — updating file: ${resolvedPath}`);
 		const syncedData = result.syncedWorkflow;
