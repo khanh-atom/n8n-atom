@@ -263,6 +263,12 @@ export interface IWorkflowDb {
 	};
 	activeVersion?: WorkflowHistory | null;
 	checksum?: string;
+	/**
+	 * Transient workspace context (e.g. `__filePath` / `__dirPath` from the
+	 * VS Code extension webview). Available at runtime via `$workspace` in
+	 * expressions. Never persisted to disk or DB.
+	 */
+	workspace?: IDataObject;
 }
 
 // For workflow list we don't need the full workflow data

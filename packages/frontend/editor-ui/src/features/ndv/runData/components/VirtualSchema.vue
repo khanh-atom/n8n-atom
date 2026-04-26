@@ -214,6 +214,16 @@ const contextSchema = computed(() => {
 		$workflow: pick(workflowsStore.workflow, ['id', 'name', 'active']),
 	};
 
+	// Expose transient workspace context (e.g. __filePath, __dirPath) injected
+	// by the VS Code extension so users can discover and drag-map $workspace fields.
+	// Read from the separate workspaceContext ref which survives workflow resets.
+	const workspace = workflowsStore.workspaceContext;
+	console.log('[VirtualSchema] contextSchema computed - workspace:', JSON.stringify(workspace));
+	if (workspace && Object.keys(workspace).length > 0) {
+		schemaSource.$workspace = workspace;
+		console.log('[VirtualSchema] Added $workspace to schemaSource');
+	}
+
 	return filterSchema(getSchema(schemaSource), props.search);
 });
 

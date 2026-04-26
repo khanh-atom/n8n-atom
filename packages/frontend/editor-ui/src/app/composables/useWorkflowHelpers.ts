@@ -587,6 +587,14 @@ export function useWorkflowHelpers() {
 			meta: workflowsStore.workflow.meta,
 		};
 
+		// Forward transient workspace context (e.g. __filePath / __dirPath
+		// injected by the VS Code extension) so the backend can expose it via
+		// `$workspace` in expressions. The backend never persists it.
+		const workspace = workflowsStore.workflow.workspace;
+		if (workspace && Object.keys(workspace).length > 0) {
+			data.workspace = workspace;
+		}
+
 		const workflowId = workflowsStore.workflowId;
 		// Always include workflow ID if it exists
 		if (workflowId) {

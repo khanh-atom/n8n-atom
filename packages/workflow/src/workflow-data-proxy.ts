@@ -692,6 +692,54 @@ export class WorkflowDataProxy {
 	}
 
 	/**
+	 * Returns a proxy exposing the transient workspace context as `$workspace`.
+	 *
+	 * The workspace data is provided at runtime (e.g. by the VS Code extension
+	 * webview, which appends `__filePath` / `__dirPath` to the workflow on open)
+	 * and is never persisted. Reads always reflect the current
+	 * `workflow.workspace` value, so updating the underlying object is picked
+	 * up without rebuilding the proxy.
+	 */
+	private workspaceGetter() {
+		const that = this;
+
+		return new Proxy(
+			{},
+			{
+				has: (_target, name) => {
+					const workspace = that.workflow.workspace;
+					if (!workspace || typeof name !== 'string') return false;
+					return Object.prototype.hasOwnProperty.call(workspace, name);
+				},
+				ownKeys() {
+					const workspace = that.workflow.workspace;
+					return workspace ? Object.keys(workspace) : [];
+				},
+				getOwnPropertyDescriptor() {
+					return {
+						enumerable: true,
+						configurable: true,
+					};
+				},
+				get(target, name, receiver) {
+					if (name === 'isProxy') return true;
+
+					const workspace = that.workflow.workspace;
+					if (
+						workspace &&
+						typeof name === 'string' &&
+						Object.prototype.hasOwnProperty.call(workspace, name)
+					) {
+						return workspace[name];
+					}
+
+					return Reflect.get(target, name, receiver);
+				},
+			},
+		);
+	}
+
+	/**
 	 * Returns a proxy to query data of all nodes
 	 *
 	 * @private
@@ -1456,6 +1504,7 @@ export class WorkflowDataProxy {
 			$runIndex: this.runIndex,
 			$mode: this.mode,
 			$workflow: this.workflowGetter(),
+			$workspace: this.workspaceGetter(),
 			$itemIndex: this.itemIndex,
 			$now: DateTime.now(),
 			$today: DateTime.now().set({ hour: 0, minute: 0, second: 0, millisecond: 0 }),

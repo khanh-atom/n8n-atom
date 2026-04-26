@@ -1,7 +1,7 @@
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
 import { VIEWS } from '@/app/constants';
 import type { IWorkflowDb } from '@/Interface';
-import type { INodeUi, IConnections } from 'n8n-workflow';
+import type { INodeUi, IConnections, IDataObject } from 'n8n-workflow';
 
 export interface WorkflowSyncData {
 	name: string;
@@ -9,6 +9,12 @@ export interface WorkflowSyncData {
 	connections: IConnections;
 	settings?: Record<string, unknown>;
 	pinData?: Record<string, unknown>;
+	/**
+	 * Transient workspace context provided by the VS Code extension (e.g.
+	 * `__filePath` / `__dirPath`). Forwarded into the in-memory store so it is
+	 * available via `$workspace` at execution time. Never persisted.
+	 */
+	workspace?: IDataObject;
 }
 
 export interface WorkflowSyncResult {

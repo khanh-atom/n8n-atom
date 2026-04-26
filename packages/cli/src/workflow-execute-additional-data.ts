@@ -260,6 +260,7 @@ async function startExecution(
 		nodeTypes,
 		staticData: workflowData.staticData,
 		settings: workflowData.settings,
+		workspace: workflowData.workspace,
 	});
 
 	/**

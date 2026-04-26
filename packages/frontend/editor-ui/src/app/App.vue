@@ -120,27 +120,59 @@ async function handleVSCodeWorkflowSync(messageEvent: MessageEvent) {
 					}
 
 					console.log('[App.vue] Syncing workflow:', workflowData.name);
+					console.log('[App.vue] workflowData.workspace:', JSON.stringify(workflowData.workspace));
 					const result = await syncWorkflow(workflowData);
 
 					// Navigate to the workflow only if we're not already on it or if it's a new workflow
 					// This prevents closing the NDV when syncing after node execution
 					if (result.action === 'created' || workflowsStore.workflowId !== result.workflow.id) {
+						console.log('[App.vue] Navigating to workflow:', result.workflow.id);
 						await navigateToWorkflow(result.workflow.id);
+					} else {
+						console.log('[App.vue] Skipping navigation, already on workflow:', result.workflow.id);
 					}
 
 					// Refresh the workflow data in the UI by fetching and initializing workspace
 					try {
 						const updatedWorkflow = await workflowsStore.fetchWorkflow(result.workflow.id);
+						console.log('[App.vue] fetchWorkflow result checksum:', updatedWorkflow.checksum);
 						if (updatedWorkflow.checksum) {
-							// Check if we're currently viewing this workflow
-							if (workflowsStore.workflowId === result.workflow.id) {
+							// After navigateToWorkflow, the store's workflowId may not
+							// be set yet (route hasn't fully initialized). Compare
+							// against both the current store value and the workflow we
+							// just navigated to.
+							const isOnWorkflow =
+								workflowsStore.workflowId === result.workflow.id ||
+								workflowsStore.workflowId === '';
+							console.log(
+								'[App.vue] workflowsStore.workflowId:',
+								workflowsStore.workflowId,
+								'result.workflow.id:',
+								result.workflow.id,
+								'isOnWorkflow:',
+								isOnWorkflow,
+							);
+							if (isOnWorkflow) {
 								await initializeWorkspace(updatedWorkflow);
+
 								console.log('[App.vue] Workflow UI refreshed');
 							}
 						}
 					} catch (refreshError) {
 						console.warn('[App.vue] Failed to refresh workflow UI:', refreshError);
 						// Don't throw - sync was successful, refresh is just a nice-to-have
+					}
+
+					// Always apply the transient workspace context (e.g. `__filePath`,
+					// `__dirPath`) provided by the VS Code extension. This must happen
+					// outside the workflowId check above because navigateToWorkflow may
+					// not have finished initializing the store's workflowId yet. The
+					// backend never persists workspace, so we re-attach it here so
+					// `$workspace` resolves at execution time and appears in the
+					// "Variables and context" panel.
+					if (workflowData.workspace) {
+						console.log('[App.vue] Setting workspace:', JSON.stringify(workflowData.workspace));
+						workflowsStore.setWorkflowWorkspace(workflowData.workspace);
 					}
 
 					// Notify VS Code that sync completed

@@ -54,6 +54,12 @@ export interface WorkflowParameters {
 	staticData?: IDataObject;
 	settings?: IWorkflowSettings;
 	pinData?: IPinData;
+	/**
+	 * Transient workspace context (e.g. file path of the workflow on disk in the
+	 * VS Code extension webview). Exposed at runtime via `$workspace` and is
+	 * never persisted to the .n8n file.
+	 */
+	workspace?: IDataObject;
 }
 
 export class Workflow {
@@ -85,10 +91,16 @@ export class Workflow {
 
 	pinData?: IPinData;
 
+	/**
+	 * Transient workspace context (never persisted) — exposed in expressions as `$workspace`.
+	 */
+	workspace?: IDataObject;
+
 	constructor(parameters: WorkflowParameters) {
 		this.id = parameters.id as string; // @tech_debt Ensure this is not optional
 		this.name = parameters.name;
 		this.nodeTypes = parameters.nodeTypes;
+		this.workspace = parameters.workspace;
 
 		let nodeType: INodeType | undefined;
 		for (const node of parameters.nodes) {

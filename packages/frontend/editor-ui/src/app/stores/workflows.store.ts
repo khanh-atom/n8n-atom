@@ -155,6 +155,14 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 	const chatPartialExecutionDestinationNode = ref<string | null>(null);
 	const selectedTriggerNodeName = ref<string>();
 
+	/**
+	 * Transient workspace context (e.g. `__filePath`, `__dirPath`) provided by
+	 * the VS Code extension. Stored in a **separate ref** so it survives
+	 * `resetWorkflow()` and `setWorkflow()` which replace `workflow.value`
+	 * entirely and would wipe it.
+	 */
+	const workspaceContext = ref<IDataObject | undefined>();
+
 	const workflowName = computed(() => workflow.value.name);
 
 	const workflowId = computed(() => workflow.value.id);
@@ -598,6 +606,7 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 			nodeTypes,
 			settings: workflow.value.settings ?? { ...defaults.settings },
 			pinData: workflow.value.pinData,
+			workspace: workflow.value.workspace,
 		});
 	}
 
@@ -1057,6 +1066,26 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 			...workflow.value.meta,
 			...data,
 		};
+	}
+
+	/**
+	 * Set the transient workspace context (e.g. `__filePath` / `__dirPath`
+	 * injected by the VS Code extension webview) on the current workflow.
+	 *
+	 * This value is exposed at runtime through `$workspace` in expressions and
+	 * is intentionally never persisted to the backend or the .n8n file.
+	 */
+	function setWorkflowWorkspace(value: IDataObject | undefined): void {
+		console.log('[workflows.store] setWorkflowWorkspace called with:', JSON.stringify(value));
+		workspaceContext.value = value;
+		// Also keep workflow.value.workspace in sync for getWorkflowDataToSave
+		// and createWorkflowObject. This may get wiped by resetWorkflow/setWorkflow,
+		// but workspaceContext.value is the authoritative source.
+		workflow.value.workspace = value;
+		console.log(
+			'[workflows.store] workspaceContext is now:',
+			JSON.stringify(workspaceContext.value),
+		);
 	}
 
 	function setWorkflow(value: IWorkflowDb): void {
@@ -1612,6 +1641,13 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 		}
 		sendData.settings.availableInMCP = false;
 
+		// `workspace` is a transient runtime context (e.g. file paths from the
+		// VS Code extension webview) and must never be persisted. Strip it so
+		// it never reaches the backend create path.
+		if ('workspace' in (sendData as Record<string, unknown>)) {
+			delete (sendData as Record<string, unknown>).workspace;
+		}
+
 		const projectStore = useProjectsStore();
 
 		if (!sendData.projectId && projectStore.currentProjectId) {
@@ -1646,6 +1682,13 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 	): Promise<IWorkflowDb> {
 		if (data.settings === null) {
 			data.settings = undefined;
+		}
+
+		// `workspace` is a transient runtime context (e.g. file paths from the
+		// VS Code extension webview) and must never be persisted. Strip it so
+		// it never reaches the backend save path.
+		if ('workspace' in (data as Record<string, unknown>)) {
+			delete (data as Record<string, unknown>).workspace;
 		}
 
 		const updatedWorkflow = await makeRestApiRequest<IWorkflowDb>(
@@ -2093,6 +2136,8 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 		setWorkflowScopes,
 		setWorkflowMetadata,
 		addToWorkflowMetadata,
+		setWorkflowWorkspace,
+		workspaceContext,
 		setWorkflow,
 		pinData,
 		unpinData,

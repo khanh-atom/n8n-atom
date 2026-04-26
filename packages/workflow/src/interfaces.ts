@@ -2332,6 +2332,7 @@ export interface IWorkflowDataProxyData {
 	$parameter: INodeParameters;
 	$position: number;
 	$workflow: any;
+	$workspace: any;
 	$: any;
 	$input: ProxyInput;
 	$thisItem: any;
@@ -2622,6 +2623,12 @@ export interface IWorkflowBase {
 	activeVersion?: IWorkflowHistory | null;
 	versionCounter?: number;
 	meta?: WorkflowFEMeta;
+	/**
+	 * Transient workspace context provided by the VS Code extension (e.g.
+	 * `__filePath`, `__dirPath`) so expressions can reference it via
+	 * `$workspace`. Never persisted to the .n8n file or DB.
+	 */
+	workspace?: IDataObject;
 }
 
 interface IWorkflowHistory {

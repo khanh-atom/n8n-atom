@@ -1,4 +1,4 @@
-import type { IWorkflowSettings, IConnections, INode, IPinData } from 'n8n-workflow';
+import type { IWorkflowSettings, IConnections, INode, IPinData, IDataObject } from 'n8n-workflow';
 
 import type { ITag } from './tags';
 
@@ -22,6 +22,12 @@ export interface WorkflowData {
 	versionId?: string;
 	activeVersionId?: string | null;
 	meta?: WorkflowMetadata;
+	/**
+	 * Transient workspace context (e.g. `__filePath` / `__dirPath` from the
+	 * VS Code extension webview). Forwarded to the backend on manual run so
+	 * `$workspace` resolves at execution time. Never persisted to disk or DB.
+	 */
+	workspace?: IDataObject;
 }
 
 export interface WorkflowDataUpdate {
