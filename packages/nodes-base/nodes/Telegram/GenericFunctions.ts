@@ -4,7 +4,9 @@ import type {
 	IHookFunctions,
 	IHttpRequestMethods,
 	ILoadOptionsFunctions,
+	IPollFunctions,
 	IRequestOptions,
+	ITriggerFunctions,
 	IWebhookFunctions,
 	JsonObject,
 } from 'n8n-workflow';
@@ -192,7 +194,13 @@ export function addAdditionalFields(
  *
  */
 export async function apiRequest(
-	this: IHookFunctions | IExecuteFunctions | ILoadOptionsFunctions | IWebhookFunctions,
+	this:
+		| IHookFunctions
+		| IExecuteFunctions
+		| ILoadOptionsFunctions
+		| IPollFunctions
+		| ITriggerFunctions
+		| IWebhookFunctions,
 	method: IHttpRequestMethods,
 	endpoint: string,
 	body: IDataObject,

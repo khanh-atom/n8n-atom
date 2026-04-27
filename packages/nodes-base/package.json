@@ -785,6 +785,7 @@
       "dist/nodes/Tapfiliate/Tapfiliate.node.js",
       "dist/nodes/Telegram/Telegram.node.js",
       "dist/nodes/Telegram/TelegramTrigger.node.js",
+      "dist/nodes/Telegram/TelegramPollingTrigger.node.js",
       "dist/nodes/TheHiveProject/TheHiveProject.node.js",
       "dist/nodes/TheHiveProject/TheHiveProjectTrigger.node.js",
       "dist/nodes/TheHive/TheHive.node.js",
