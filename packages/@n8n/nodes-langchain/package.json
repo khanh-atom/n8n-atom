@@ -87,6 +87,7 @@
       "dist/nodes/llms/LmChatAwsBedrock/LmChatAwsBedrock.node.js",
       "dist/nodes/llms/LmChatCohere/LmChatCohere.node.js",
       "dist/nodes/llms/LmChatCursorAgent/LmChatCursorAgent.node.js",
+      "dist/nodes/llms/LmChatCodexCli/LmChatCodexCli.node.js",
       "dist/nodes/llms/LmChatDeepSeek/LmChatDeepSeek.node.js",
       "dist/nodes/llms/LmChatGoogleGemini/LmChatGoogleGemini.node.js",
       "dist/nodes/llms/LmChatGoogleVertex/LmChatGoogleVertex.node.js",
