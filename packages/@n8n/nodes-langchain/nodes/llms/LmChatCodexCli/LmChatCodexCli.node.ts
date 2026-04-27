@@ -32,6 +32,11 @@ interface ParsedToolCall {
 	args: Record<string, unknown>;
 }
 
+interface ParsedJsonlResult {
+	assistantText: string;
+	errorMessage: string;
+}
+
 const TOOL_CALL_SYSTEM_PROMPT = `You have access to the following tools. When you need to call a tool, respond ONLY with a JSON block in this exact format (no other text before or after):
 
 \`\`\`tool_calls
@@ -191,8 +196,8 @@ class ChatCodexCLI extends BaseChatModel {
 	}
 
 	private async executeCodexCli(prompt: string): Promise<string> {
-		// Build args: codex exec --json --skip-git-repo-check --sandbox <mode> [--model <model>] [--cd <dir>] -
-		const args = ['exec', '--json', '--skip-git-repo-check'];
+		// Build args: codex exec --json --skip-git-repo-check --full-auto [--sandbox <mode>] [--model <model>] [--cd <dir>] -
+		const args = ['exec', '--json', '--skip-git-repo-check', '--full-auto'];
 
 		if (this.sandboxMode) {
 			args.push('--sandbox', this.sandboxMode);
@@ -252,26 +257,39 @@ class ChatCodexCLI extends BaseChatModel {
 					stderrLength: stderr.length,
 				});
 
-				if (code !== 0 && !stdout) {
-					const errorMsg = stderr.trim() || `codex exec exited with code ${code}`;
-					console.error('[LmChatCodexCli] codex exec failed:', errorMsg);
+				// Parse the JSONL output — even on non-zero exit code, stdout may contain
+				// useful JSONL events (e.g. error messages from the Codex API)
+				const parseResult = this.parseJsonlOutput(stdout);
+
+				if (parseResult.assistantText) {
+					console.log(
+						'[LmChatCodexCli] parsed assistant content, length:',
+						parseResult.assistantText.length,
+					);
+					resolve(parseResult.assistantText);
+					return;
+				}
+
+				// No assistant response — build a meaningful error from available info
+				if (parseResult.errorMessage) {
+					console.error('[LmChatCodexCli] codex returned error:', parseResult.errorMessage);
+					reject(new Error(`Codex CLI error: ${parseResult.errorMessage}`));
+					return;
+				}
+
+				if (code !== 0) {
+					const stderrMsg = stderr.trim();
+					const errorMsg = stderrMsg || `codex exec exited with code ${code}`;
+					console.error('[LmChatCodexCli] codex exec failed with code', code, ':', errorMsg);
 					reject(new Error(errorMsg));
 					return;
 				}
 
-				const assistantContent = this.parseJsonlOutput(stdout);
-
-				if (!assistantContent) {
-					console.error(
-						'[LmChatCodexCli] no assistant response parsed from output, stdout preview:',
-						stdout.substring(0, 500),
-					);
-					reject(new Error('No assistant response received from codex exec'));
-					return;
-				}
-
-				console.log('[LmChatCodexCli] parsed assistant content, length:', assistantContent.length);
-				resolve(assistantContent);
+				console.error(
+					'[LmChatCodexCli] no assistant response parsed from output, stdout preview:',
+					stdout.substring(0, 500),
+				);
+				reject(new Error('No assistant response received from codex exec'));
 			});
 
 			if (child.stdin) {
@@ -283,79 +301,100 @@ class ChatCodexCLI extends BaseChatModel {
 
 	/**
 	 * Parse JSONL output from `codex exec --json`.
-	 * Each line is a JSON event. We look for message events with assistant role
-	 * containing text content.
 	 *
-	 * Known event types from codex exec --json:
-	 * - {"type": "message", "role": "assistant", "content": [...]}
-	 * - {"type": "function_call", ...}
-	 * - {"type": "text_delta", "delta": "..."}
-	 * - Various other event types
+	 * Actual event types from codex exec --json (verified empirically):
+	 * - {"type":"thread.started","thread_id":"..."}
+	 * - {"type":"turn.started"}
+	 * - {"type":"item.started","item":{"type":"agent_message",...}}
+	 * - {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
+	 * - {"type":"turn.completed"}
+	 * - {"type":"error","message":"..."}
+	 * - {"type":"turn.failed","error":{"message":"..."}}
 	 *
-	 * We extract text from assistant message content arrays and text_delta events.
+	 * Returns both assistant text and any error messages found.
 	 */
-	private parseJsonlOutput(output: string): string {
+	private parseJsonlOutput(output: string): ParsedJsonlResult {
 		const lines = output.split('\n').filter((line) => line.trim());
 		const assistantParts: string[] = [];
+		const errorParts: string[] = [];
 
 		console.log('[LmChatCodexCli] parsing JSONL output, line count:', lines.length);
 
 		for (const line of lines) {
 			try {
-				const parsed = JSON.parse(line) as {
-					type?: string;
-					role?: string;
-					content?: Array<{ type?: string; text?: string }> | string;
-					message?: {
-						role?: string;
-						content?: Array<{ type?: string; text?: string }> | string;
-					};
-					delta?: string;
-					text?: string;
-				};
+				const parsed = JSON.parse(line) as Record<string, unknown>;
+				const eventType = parsed.type as string | undefined;
 
-				// Handle direct message events: {"type":"message","role":"assistant","content":[...]}
-				if (parsed.type === 'message' && parsed.role === 'assistant' && parsed.content) {
-					if (Array.isArray(parsed.content)) {
-						for (const item of parsed.content) {
-							if (item.type === 'text' && item.text) {
-								assistantParts.push(item.text);
-							}
-						}
-					} else if (typeof parsed.content === 'string') {
-						assistantParts.push(parsed.content);
+				console.log(
+					'[LmChatCodexCli] JSONL event:',
+					eventType,
+					'| keys:',
+					Object.keys(parsed).join(','),
+				);
+
+				// item.completed with agent_message => assistant text
+				if (eventType === 'item.completed') {
+					const item = parsed.item as Record<string, unknown> | undefined;
+					if (item?.type === 'agent_message' && typeof item.text === 'string') {
+						console.log(
+							'[LmChatCodexCli] found agent_message text, length:',
+							(item.text as string).length,
+						);
+						assistantParts.push(item.text as string);
 					}
 				}
 
-				// Handle nested message events (cursor-agent style):
-				// {"type":"assistant","message":{"content":[...]}}
-				if (parsed.type === 'assistant' && parsed.message?.content) {
-					if (Array.isArray(parsed.message.content)) {
-						for (const item of parsed.message.content) {
-							if (item.type === 'text' && item.text) {
-								assistantParts.push(item.text);
+				// Direct message events (fallback for other versions)
+				if (eventType === 'message' && parsed.role === 'assistant') {
+					const content = parsed.content;
+					if (Array.isArray(content)) {
+						for (const c of content as Array<Record<string, unknown>>) {
+							if (c.type === 'text' && typeof c.text === 'string') {
+								assistantParts.push(c.text as string);
 							}
 						}
-					} else if (typeof parsed.message.content === 'string') {
-						assistantParts.push(parsed.message.content);
+					} else if (typeof content === 'string') {
+						assistantParts.push(content);
 					}
 				}
 
-				// Handle text_delta streaming events
-				if (parsed.type === 'text_delta' && parsed.delta) {
-					assistantParts.push(parsed.delta);
+				// Nested assistant message (cursor-agent compatibility)
+				if (eventType === 'assistant') {
+					const message = parsed.message as Record<string, unknown> | undefined;
+					if (message?.content) {
+						if (Array.isArray(message.content)) {
+							for (const c of message.content as Array<Record<string, unknown>>) {
+								if (c.type === 'text' && typeof c.text === 'string') {
+									assistantParts.push(c.text as string);
+								}
+							}
+						} else if (typeof message.content === 'string') {
+							assistantParts.push(message.content);
+						}
+					}
 				}
 
-				// Handle response.completed events that may carry final text
-				if (parsed.type === 'response.completed' && parsed.text) {
-					assistantParts.push(parsed.text);
+				// Error events
+				if (eventType === 'error' && typeof parsed.message === 'string') {
+					errorParts.push(parsed.message);
+				}
+
+				// turn.failed with error
+				if (eventType === 'turn.failed') {
+					const error = parsed.error as Record<string, unknown> | undefined;
+					if (error && typeof error.message === 'string') {
+						errorParts.push(error.message);
+					}
 				}
 			} catch {
 				// Skip non-JSON lines (e.g. progress output)
 			}
 		}
 
-		return assistantParts.join('');
+		return {
+			assistantText: assistantParts.join(''),
+			errorMessage: errorParts.join('; '),
+		};
 	}
 }
 
@@ -395,17 +434,15 @@ export class LmChatCodexCli implements INodeType {
 				// eslint-disable-next-line n8n-nodes-base/node-param-options-type-unsorted-items
 				options: [
 					{ name: 'Auto (Default)', value: 'auto' },
-					// Codex-native models
-					{ name: 'Codex Mini Latest', value: 'codex-mini-latest' },
-					// GPT-5 series
+					// GPT-5 series (supported by Codex CLI)
 					{ name: 'GPT-5.5', value: 'gpt-5.5' },
-					// O-series reasoning models
-					{ name: 'o3', value: 'o3' },
-					{ name: 'o4-mini', value: 'o4-mini' },
-					// GPT-4.1 series
-					{ name: 'GPT-4.1', value: 'gpt-4.1' },
-					{ name: 'GPT-4.1 Mini', value: 'gpt-4.1-mini' },
-					{ name: 'GPT-4.1 Nano', value: 'gpt-4.1-nano' },
+					{ name: 'GPT-5.5 Fast', value: 'gpt-5.5-fast' },
+					{ name: 'GPT-5.4', value: 'gpt-5.4' },
+					{ name: 'GPT-5.4 Fast', value: 'gpt-5.4-fast' },
+					{ name: 'GPT-5.4 Mini', value: 'gpt-5.4-mini' },
+					{ name: 'GPT-5.3 Codex', value: 'gpt-5.3-codex' },
+					{ name: 'GPT-5.3 Codex Spark', value: 'gpt-5.3-codex-spark' },
+					{ name: 'GPT-5.2', value: 'gpt-5.2' },
 				],
 				default: 'auto',
 			},
