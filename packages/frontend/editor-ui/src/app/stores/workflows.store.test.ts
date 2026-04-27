@@ -117,6 +117,24 @@ describe('useWorkflowsStore', () => {
 		expect(workflowsStore.workflow.id).toBe('');
 	});
 
+	it('should keep workspace context on the live workflow object for expression resolution', () => {
+		const workspace = {
+			__filePath: '/tmp/workflows/example.n8n',
+			__dirPath: '/tmp/workflows',
+		};
+
+		workflowsStore.setWorkflowWorkspace(workspace);
+
+		expect(workflowsStore.workspaceContext).toEqual(workspace);
+		expect(workflowsStore.workflow.workspace).toEqual(workspace);
+		expect(workflowsStore.workflowObject.workspace).toEqual(workspace);
+
+		workflowsStore.setWorkflow(createTestWorkflow({ workspace: undefined }));
+
+		expect(workflowsStore.workflow.workspace).toEqual(workspace);
+		expect(workflowsStore.workflowObject.workspace).toEqual(workspace);
+	});
+
 	describe('isWaitingExecution', () => {
 		it('should return false if no activeNode and no waiting nodes in workflow', () => {
 			workflowsStore.setNodes([

@@ -129,6 +129,15 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 	const sourceControlStore = useSourceControlStore();
 
 	const workflow = ref<IWorkflowDb>(createEmptyWorkflow());
+
+	/**
+	 * Transient workspace context (e.g. `__filePath`, `__dirPath`) provided by
+	 * the VS Code extension. Stored in a **separate ref** so it survives
+	 * `resetWorkflow()` and `setWorkflow()` which replace `workflow.value`
+	 * entirely and would wipe it.
+	 */
+	const workspaceContext = ref<IDataObject | undefined>();
+
 	const workflowObject = ref<Workflow>(
 		// eslint-disable-next-line @typescript-eslint/no-use-before-define
 		createWorkflowObject(workflow.value.nodes, workflow.value.connections),
@@ -154,14 +163,6 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 	const chatMessages = ref<string[]>([]);
 	const chatPartialExecutionDestinationNode = ref<string | null>(null);
 	const selectedTriggerNodeName = ref<string>();
-
-	/**
-	 * Transient workspace context (e.g. `__filePath`, `__dirPath`) provided by
-	 * the VS Code extension. Stored in a **separate ref** so it survives
-	 * `resetWorkflow()` and `setWorkflow()` which replace `workflow.value`
-	 * entirely and would wipe it.
-	 */
-	const workspaceContext = ref<IDataObject | undefined>();
 
 	const workflowName = computed(() => workflow.value.name);
 
@@ -590,6 +591,15 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 		copyData?: boolean,
 	): Workflow {
 		const nodeTypes = getNodeTypes();
+		const workspace = workflow.value.workspace ?? workspaceContext.value;
+
+		if (workspace && Object.keys(workspace).length > 0) {
+			console.log('[workflows.store] createWorkflowObject - using workspace context:', {
+				workflowId: workflow.value.id,
+				workspaceKeys: Object.keys(workspace),
+				dirPath: workspace.__dirPath,
+			});
+		}
 
 		let id: string | undefined = workflow.value.id;
 		// If workflow doesn't exist in store, treat as new (no ID)
@@ -606,7 +616,7 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 			nodeTypes,
 			settings: workflow.value.settings ?? { ...defaults.settings },
 			pinData: workflow.value.pinData,
-			workspace: workflow.value.workspace,
+			workspace,
 		});
 	}
 
@@ -1096,18 +1106,24 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 	 * injected by the VS Code extension webview) on the current workflow.
 	 *
 	 * This value is exposed at runtime through `$workspace` in expressions and
-	 * is intentionally never persisted to the backend or the .n8n file.
+	 * is intentionally never persisted to the .n8n file.
 	 */
 	function setWorkflowWorkspace(value: IDataObject | undefined): void {
 		console.log('[workflows.store] setWorkflowWorkspace called with:', JSON.stringify(value));
 		workspaceContext.value = value;
 		// Also keep workflow.value.workspace in sync for getWorkflowDataToSave
-		// and createWorkflowObject. This may get wiped by resetWorkflow/setWorkflow,
-		// but workspaceContext.value is the authoritative source.
+		// and createWorkflowObject.
 		workflow.value.workspace = value;
+		// Keep the already-created Workflow instance in sync so expression
+		// previews and drag-mapped inputs resolve `$workspace` immediately.
+		workflowObject.value.workspace = value;
 		console.log(
-			'[workflows.store] workspaceContext is now:',
-			JSON.stringify(workspaceContext.value),
+			'[workflows.store] workspace synced to state and workflow object:',
+			JSON.stringify({
+				workspaceContext: workspaceContext.value,
+				workflowWorkspace: workflow.value.workspace,
+				workflowObjectWorkspace: workflowObject.value.workspace,
+			}),
 		);
 	}
 
@@ -1122,6 +1138,19 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 			...(!value.hasOwnProperty('nodes') ? { nodes: [] } : {}),
 			...(!value.hasOwnProperty('settings') ? { settings: { ...defaults.settings } } : {}),
 		};
+
+		if (!workflow.value.workspace && workspaceContext.value) {
+			console.log(
+				'[workflows.store] setWorkflow - restoring workspace context after workflow replace:',
+				{
+					workflowId: workflow.value.id,
+					workspaceKeys: Object.keys(workspaceContext.value),
+					dirPath: workspaceContext.value.__dirPath,
+				},
+			);
+			workflow.value.workspace = workspaceContext.value;
+		}
+
 		workflowObject.value = createWorkflowObject(
 			workflow.value.nodes,
 			workflow.value.connections,

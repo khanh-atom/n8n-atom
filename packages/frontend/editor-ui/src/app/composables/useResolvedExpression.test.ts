@@ -135,4 +135,25 @@ describe('useResolvedExpression', () => {
 		vi.advanceTimersByTime(200);
 		expect(toValue(resolvedExpressionString)).toBe('New Name');
 	});
+
+	it('should re-resolve when workspace context changes', async () => {
+		const workflowsStore = useWorkflowsStore();
+		const resolveExpressionSpy = mockResolveExpression();
+		resolveExpressionSpy.mockImplementation(
+			() => workflowsStore.workflowObject.workspace?.__dirPath,
+		);
+
+		const { resolvedExpressionString } = await renderTestComponent({
+			expression: '={{ $workspace.__dirPath }}',
+		});
+
+		workflowsStore.setWorkflowWorkspace({
+			__filePath: '/tmp/workflows/example.n8n',
+			__dirPath: '/tmp/workflows',
+		});
+		await nextTick();
+		vi.advanceTimersByTime(200);
+
+		expect(toValue(resolvedExpressionString)).toBe('/tmp/workflows');
+	});
 });

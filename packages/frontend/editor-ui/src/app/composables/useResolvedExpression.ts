@@ -95,9 +95,33 @@ export function useResolvedExpression({
 
 	function updateExpression() {
 		if (isExpression.value) {
+			const expressionString = toValue(expression);
+			const isWorkspaceExpression =
+				typeof expressionString === 'string' && expressionString.includes('$workspace');
+
+			if (isWorkspaceExpression) {
+				const workspace =
+					workflowsStore.workspaceContext ??
+					workflowsStore.workflow.workspace ??
+					workflowsStore.workflowObject.workspace;
+
+				console.log('[useResolvedExpression] resolving $workspace expression:', {
+					expression: expressionString,
+					workspaceKeys: Object.keys(workspace ?? {}),
+					dirPath: workspace?.__dirPath,
+				});
+			}
+
 			const resolved = resolve(expressionLocalResolveCtx.value);
 			resolvedExpression.value = resolved.ok ? resolved.result : null;
 			resolvedExpressionString.value = stringifyExpressionResult(resolved, hasRunData.value);
+
+			if (isWorkspaceExpression) {
+				console.log('[useResolvedExpression] resolved $workspace expression:', {
+					ok: resolved.ok,
+					value: resolved.ok ? resolved.result : resolved.error.message,
+				});
+			}
 		} else {
 			resolvedExpression.value = null;
 			resolvedExpressionString.value = '';
@@ -111,6 +135,9 @@ export function useResolvedExpression({
 			() => workflowsStore.getWorkflowExecution,
 			() => workflowsStore.getWorkflowRunData,
 			() => workflowsStore.workflow.name,
+			() => workflowsStore.workflow.workspace,
+			() => workflowsStore.workspaceContext,
+			() => workflowsStore.workflowObject.workspace,
 			targetItem,
 		],
 		debouncedUpdateExpression,
