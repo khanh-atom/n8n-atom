@@ -50,3 +50,4 @@ packages/cli/src/commands/export/outputs
 *.bak
 *.log
 example-workflow.data
+.atom8n/My Board.kanban
