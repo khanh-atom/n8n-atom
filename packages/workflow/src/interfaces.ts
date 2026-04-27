@@ -2624,9 +2624,9 @@ export interface IWorkflowBase {
 	versionCounter?: number;
 	meta?: WorkflowFEMeta;
 	/**
-	 * Transient workspace context provided by the VS Code extension (e.g.
+	 * Workspace context provided by the VS Code extension (e.g.
 	 * `__filePath`, `__dirPath`) so expressions can reference it via
-	 * `$workspace`. Never persisted to the .n8n file or DB.
+	 * `$workspace`. Persisted to the DB but never written to the .n8n file.
 	 */
 	workspace?: IDataObject;
 }

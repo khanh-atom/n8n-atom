@@ -351,6 +351,7 @@ export class WorkflowService {
 			'versionId',
 			'description',
 			'updatedAt',
+			'workspace',
 			// do not update active fields
 		];
 

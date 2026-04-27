@@ -264,9 +264,9 @@ export interface IWorkflowDb {
 	activeVersion?: WorkflowHistory | null;
 	checksum?: string;
 	/**
-	 * Transient workspace context (e.g. `__filePath` / `__dirPath` from the
+	 * Workspace context (e.g. `__filePath` / `__dirPath` from the
 	 * VS Code extension webview). Available at runtime via `$workspace` in
-	 * expressions. Never persisted to disk or DB.
+	 * expressions. Persisted to DB but never written to .n8n files.
 	 */
 	workspace?: IDataObject;
 }

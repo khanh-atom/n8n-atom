@@ -71,6 +71,12 @@ export class WorkflowEntity extends WithTimestampsAndStringId implements IWorkfl
 	})
 	meta?: WorkflowFEMeta;
 
+	@JsonColumn({
+		nullable: true,
+		transformer: objectRetriever,
+	})
+	workspace?: IDataObject;
+
 	@ManyToMany('TagEntity', 'workflows')
 	@JoinTable({
 		name: 'workflows_tags', // table name for the junction table of this relation

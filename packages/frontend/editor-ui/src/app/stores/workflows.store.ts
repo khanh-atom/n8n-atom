@@ -752,6 +752,29 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 	async function fetchWorkflow(id: string): Promise<IWorkflowDb> {
 		const workflowData = await workflowsApi.getWorkflow(rootStore.restApiContext, id);
 		addWorkflow(workflowData);
+
+		// Restore workspace context from DB if available (enables $workspace
+		// when opening a workflow directly in the browser, not just via the
+		// VS Code extension sync).
+		console.log('[workflows.store] fetchWorkflow - workflowData from API:', {
+			id: workflowData.id,
+			hasWorkspace: !!workflowData.workspace,
+			workspaceData: workflowData.workspace,
+		});
+
+		if (workflowData.workspace && Object.keys(workflowData.workspace).length > 0) {
+			console.log(
+				'[workflows.store] fetchWorkflow - restoring workspace from DB:',
+				JSON.stringify(workflowData.workspace),
+			);
+			workspaceContext.value = workflowData.workspace;
+		} else {
+			console.log(
+				'[workflows.store] fetchWorkflow - no workspace data found in DB or empty:',
+				JSON.stringify(workflowData.workspace),
+			);
+		}
+
 		return workflowData;
 	}
 
@@ -1641,12 +1664,12 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 		}
 		sendData.settings.availableInMCP = false;
 
-		// `workspace` is a transient runtime context (e.g. file paths from the
-		// VS Code extension webview) and must never be persisted. Strip it so
-		// it never reaches the backend create path.
-		if ('workspace' in (sendData as Record<string, unknown>)) {
-			delete (sendData as Record<string, unknown>).workspace;
-		}
+		// `workspace` is now persisted to the DB so that $workspace is
+		// available when opening the workflow directly in the browser.
+		console.log(
+			'[workflows.store] createNewWorkflow - workspace:',
+			JSON.stringify((sendData as Record<string, unknown>).workspace),
+		);
 
 		const projectStore = useProjectsStore();
 
@@ -1684,12 +1707,12 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 			data.settings = undefined;
 		}
 
-		// `workspace` is a transient runtime context (e.g. file paths from the
-		// VS Code extension webview) and must never be persisted. Strip it so
-		// it never reaches the backend save path.
-		if ('workspace' in (data as Record<string, unknown>)) {
-			delete (data as Record<string, unknown>).workspace;
-		}
+		// `workspace` is now persisted to the DB so that $workspace is
+		// available when opening the workflow directly in the browser.
+		console.log(
+			'[workflows.store] updateWorkflow - workspace:',
+			JSON.stringify((data as Record<string, unknown>).workspace),
+		);
 
 		const updatedWorkflow = await makeRestApiRequest<IWorkflowDb>(
 			rootStore.restApiContext,

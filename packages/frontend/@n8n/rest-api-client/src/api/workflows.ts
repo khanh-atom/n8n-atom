@@ -23,9 +23,10 @@ export interface WorkflowData {
 	activeVersionId?: string | null;
 	meta?: WorkflowMetadata;
 	/**
-	 * Transient workspace context (e.g. `__filePath` / `__dirPath` from the
+	 * Workspace context (e.g. `__filePath` / `__dirPath` from the
 	 * VS Code extension webview). Forwarded to the backend on manual run so
-	 * `$workspace` resolves at execution time. Never persisted to disk or DB.
+	 * `$workspace` resolves at execution time. Persisted to DB but never
+	 * written to the `.n8n` file on disk.
 	 */
 	workspace?: IDataObject;
 }
@@ -48,6 +49,8 @@ export interface WorkflowDataUpdate {
 	expectedChecksum?: string;
 	aiBuilderAssisted?: boolean;
 	autosaved?: boolean;
+	/** Workspace context persisted to DB for $workspace access in browser. */
+	workspace?: IDataObject;
 }
 
 export interface WorkflowDataCreate extends WorkflowDataUpdate {

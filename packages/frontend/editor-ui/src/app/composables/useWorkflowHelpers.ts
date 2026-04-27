@@ -587,9 +587,9 @@ export function useWorkflowHelpers() {
 			meta: workflowsStore.workflow.meta,
 		};
 
-		// Forward transient workspace context (e.g. __filePath / __dirPath
+		// Forward workspace context (e.g. __filePath / __dirPath
 		// injected by the VS Code extension) so the backend can expose it via
-		// `$workspace` in expressions. The backend never persists it.
+		// `$workspace` in expressions. Persisted to DB but never to .n8n files.
 		const workspace = workflowsStore.workflow.workspace;
 		if (workspace && Object.keys(workspace).length > 0) {
 			data.workspace = workspace;

@@ -217,7 +217,9 @@ const contextSchema = computed(() => {
 	// Expose transient workspace context (e.g. __filePath, __dirPath) injected
 	// by the VS Code extension so users can discover and drag-map $workspace fields.
 	// Read from the separate workspaceContext ref which survives workflow resets.
-	const workspace = workflowsStore.workspaceContext;
+	// Fall back to workflow.workspace for when the workflow was loaded from the DB
+	// (browser-direct open) but workspaceContext hasn't been explicitly set yet.
+	const workspace = workflowsStore.workspaceContext ?? workflowsStore.workflow.workspace;
 	console.log('[VirtualSchema] contextSchema computed - workspace:', JSON.stringify(workspace));
 	if (workspace && Object.keys(workspace).length > 0) {
 		schemaSource.$workspace = workspace;

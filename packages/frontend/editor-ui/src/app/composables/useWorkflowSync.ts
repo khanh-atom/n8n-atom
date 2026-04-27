@@ -10,9 +10,9 @@ export interface WorkflowSyncData {
 	settings?: Record<string, unknown>;
 	pinData?: Record<string, unknown>;
 	/**
-	 * Transient workspace context provided by the VS Code extension (e.g.
-	 * `__filePath` / `__dirPath`). Forwarded into the in-memory store so it is
-	 * available via `$workspace` at execution time. Never persisted.
+	 * Workspace context provided by the VS Code extension (e.g.
+	 * `__filePath` / `__dirPath`). Persisted to the DB so it is
+	 * available via `$workspace` when opening the workflow in the browser.
 	 */
 	workspace?: IDataObject;
 }
@@ -123,11 +123,16 @@ export function useWorkflowSync() {
 				console.log('[WorkflowSync] Updating workflow...');
 
 				// Update existing workflow
+				console.log(
+					'[WorkflowSync] Including workspace in update:',
+					JSON.stringify(workflowData.workspace),
+				);
 				const updated = await workflowsStore.updateWorkflow(existingWorkflow.id, {
 					nodes: workflowData.nodes,
 					connections: workflowData.connections,
 					settings: workflowData.settings,
 					pinData: workflowData.pinData,
+					workspace: workflowData.workspace,
 				});
 
 				console.log('[WorkflowSync] Workflow updated successfully');
@@ -140,11 +145,16 @@ export function useWorkflowSync() {
 			console.log('[WorkflowSync] Creating new workflow...');
 
 			// Create new workflow
+			console.log(
+				'[WorkflowSync] Including workspace in create:',
+				JSON.stringify(workflowData.workspace),
+			);
 			const newWorkflow = await workflowsStore.createNewWorkflow({
 				name: workflowData.name,
 				nodes: workflowData.nodes,
 				connections: workflowData.connections,
 				settings: workflowData.settings || {},
+				workspace: workflowData.workspace,
 			});
 
 			console.log('[WorkflowSync] New workflow created with ID:', newWorkflow.id);
