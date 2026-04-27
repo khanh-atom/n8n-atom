@@ -5,6 +5,7 @@ import type { ChatResult } from '@langchain/core/outputs';
 import type { CallbackManagerForLLMRun } from '@langchain/core/callbacks/manager';
 import type { BindToolsInput } from '@langchain/core/language_models/chat_models';
 import {
+	ApplicationError,
 	NodeConnectionTypes,
 	type INodeType,
 	type INodeTypeDescription,
@@ -16,6 +17,7 @@ import { getConnectionHintNoticeField } from '@utils/sharedFields';
 
 import { N8nLlmTracing } from '../N8nLlmTracing';
 import { spawn } from 'child_process';
+import { existsSync, statSync } from 'fs';
 
 interface CursorAgentFields {
 	model: string;
@@ -74,7 +76,11 @@ class ChatCursorAgentCLI extends BaseChatModel {
 		clone.boundTools = tools;
 		clone.callbacks = this.callbacks;
 		if (kwargs) {
-			return clone.bind(kwargs);
+			return (
+				clone as unknown as {
+					bind: (kwargs: Record<string, unknown>) => ChatCursorAgentCLI;
+				}
+			).bind(kwargs as Record<string, unknown>);
 		}
 		return clone;
 	}
@@ -171,10 +177,17 @@ class ChatCursorAgentCLI extends BaseChatModel {
 		if (this.model && this.model !== 'auto') {
 			args.push('--model', this.model);
 		}
+		const cwd = this.workingDirectory?.trim() || undefined;
+
+		console.log('[LmChatCursorAgent] spawning cursor-agent', {
+			binaryPath: this.binaryPath,
+			model: this.model,
+			cwd,
+		});
 
 		return await new Promise<string>((resolve, reject) => {
 			const child = spawn(this.binaryPath, args, {
-				cwd: this.workingDirectory || undefined,
+				cwd,
 				stdio: ['pipe', 'pipe', 'pipe'],
 				env: { ...process.env },
 			});
@@ -193,7 +206,7 @@ class ChatCursorAgentCLI extends BaseChatModel {
 			child.on('error', (err: Error) => {
 				reject(
 					new Error(
-						`Failed to spawn cursor-agent: ${err.message}. Make sure cursor-agent CLI is installed and accessible.`,
+						`Failed to spawn cursor-agent: ${err.message}. Make sure cursor-agent CLI is installed and accessible. Working directory: ${cwd ?? '<default>'}`,
 					),
 				);
 			});
@@ -284,7 +297,7 @@ export class LmChatCursorAgent implements INodeType {
 				displayName: 'Model',
 				name: 'model',
 				type: 'options',
-				description: 'The model to use via cursor-agent CLI.',
+				description: 'The model to use via cursor-agent CLI',
 				// eslint-disable-next-line n8n-nodes-base/node-param-options-type-unsorted-items
 				options: [
 					{ name: 'Auto', value: 'auto' },
@@ -417,15 +430,61 @@ export class LmChatCursorAgent implements INodeType {
 	async supplyData(this: ISupplyDataFunctions, itemIndex: number): Promise<SupplyData> {
 		const modelName = this.getNodeParameter('model', itemIndex) as string;
 
-		const options = this.getNodeParameter('options', itemIndex, {}) as {
-			binaryPath?: string;
-			workingDirectory?: string;
-		};
+		const binaryPath = this.getNodeParameter(
+			'options.binaryPath',
+			itemIndex,
+			'cursor-agent',
+		) as string;
+		const rawWorkingDirectory = this.getNodeParameter('options.workingDirectory', itemIndex, '', {
+			rawExpressions: true,
+		}) as string | undefined;
+		const workingDirectory = this.getNodeParameter('options.workingDirectory', itemIndex, '') as
+			| string
+			| undefined;
+		const normalizedWorkingDirectory = (workingDirectory ?? '').trim();
+		const rawWorkingDirectoryValue = rawWorkingDirectory ?? '';
+		const isWorkingDirectoryExpression =
+			rawWorkingDirectoryValue.startsWith('=') ||
+			rawWorkingDirectoryValue.includes('{{') ||
+			rawWorkingDirectoryValue.includes('$workspace');
+
+		console.log('[LmChatCursorAgent] resolved Cursor Agent options', {
+			itemIndex,
+			modelName,
+			binaryPath,
+			rawWorkingDirectory,
+			workingDirectory: normalizedWorkingDirectory,
+		});
+
+		if (isWorkingDirectoryExpression && !normalizedWorkingDirectory) {
+			throw new ApplicationError(
+				`Cursor Agent working directory expression resolved to an empty value: ${rawWorkingDirectoryValue}`,
+			);
+		}
+
+		if (
+			normalizedWorkingDirectory.includes('{{') ||
+			normalizedWorkingDirectory.includes('$workspace')
+		) {
+			throw new ApplicationError(
+				`Cursor Agent working directory was not resolved before execution: ${normalizedWorkingDirectory}`,
+			);
+		}
+
+		if (
+			normalizedWorkingDirectory &&
+			(!existsSync(normalizedWorkingDirectory) ||
+				!statSync(normalizedWorkingDirectory).isDirectory())
+		) {
+			throw new ApplicationError(
+				`Cursor Agent working directory does not exist or is not a directory: ${normalizedWorkingDirectory}`,
+			);
+		}
 
 		const model = new ChatCursorAgentCLI({
 			model: modelName,
-			binaryPath: options.binaryPath ?? 'cursor-agent',
-			workingDirectory: options.workingDirectory ?? '',
+			binaryPath,
+			workingDirectory: normalizedWorkingDirectory,
 		});
 
 		model.callbacks = [new N8nLlmTracing(this)];

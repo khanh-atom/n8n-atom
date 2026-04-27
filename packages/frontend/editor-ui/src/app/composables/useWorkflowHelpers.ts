@@ -589,9 +589,22 @@ export function useWorkflowHelpers() {
 
 		// Forward workspace context (e.g. __filePath / __dirPath
 		// injected by the VS Code extension) so the backend can expose it via
-		// `$workspace` in expressions. Persisted to DB but never to .n8n files.
-		const workspace = workflowsStore.workflow.workspace;
-		if (workspace && Object.keys(workspace).length > 0) {
+		// `$workspace` in expressions. The transient workspaceContext is the
+		// source of truth for VS Code webview runs; workflow/workflowObject are
+		// fallbacks for persisted or already-instantiated workflow state.
+		const workspaceCandidate = [
+			{ source: 'workspaceContext', value: workflowsStore.workspaceContext },
+			{ source: 'workflow', value: workflowsStore.workflow.workspace },
+			{ source: 'workflowObject', value: workflowsStore.workflowObject.workspace },
+		].find(({ value }) => value && Object.keys(value).length > 0);
+		const workspace = workspaceCandidate?.value;
+		const workspaceSource = workspaceCandidate?.source ?? 'none';
+		console.log('[useWorkflowHelpers] getWorkflowDataToSave - workspace:', {
+			workspaceKeys: Object.keys(workspace ?? {}),
+			dirPath: workspace?.__dirPath,
+			source: workspaceSource,
+		});
+		if (workspace) {
 			data.workspace = workspace;
 		}
 
