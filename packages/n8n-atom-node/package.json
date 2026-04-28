@@ -1,6 +1,6 @@
 {
   "name": "n8n-atom-node",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Lightweight client for running n8n workflows programmatically",
   "type": "module",
   "main": "index.mjs",
