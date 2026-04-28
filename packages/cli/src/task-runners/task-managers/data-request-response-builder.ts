@@ -63,6 +63,7 @@ export class DataRequestResponseBuilder {
 			pinData: workflow.pinData,
 			settings: workflow.settings,
 			staticData: workflow.staticData,
+			workspace: workflow.workspace,
 		};
 	}
 

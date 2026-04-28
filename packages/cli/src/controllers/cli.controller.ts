@@ -127,6 +127,17 @@ export class CliController {
 
 			this.logger.info(`[cli] Synced workflow: "${workflow.name}" (ID: ${syncResult.id})`);
 
+			// ── Set workspace context for $workspace in Code nodes ────────
+			// The VS Code extension normally sets this; for CLI we derive it
+			// from the injected __filepath / __dirpath in inputData.
+			if (inputData?.__filepath || inputData?.__dirpath) {
+				workflow.workspace = {
+					...(workflow.workspace ?? {}),
+					__filePath: inputData.__filepath as string | undefined,
+					__dirPath: inputData.__dirpath as string | undefined,
+				};
+			}
+
 			// ── Step 2: Find trigger node ────────────────────────────────────
 			const triggerNode = workflow.nodes.find(
 				(node) =>
