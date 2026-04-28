@@ -46,7 +46,7 @@ export const appendAttributionOption: INodeProperties = {
 	displayName: 'Append n8n Attribution',
 	name: 'appendAttribution',
 	type: 'boolean',
-	default: true,
+	default: false,
 };
 
 export const encodeDecodeOptions: INodePropertyOptions[] = [
