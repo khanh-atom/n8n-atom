@@ -109,7 +109,7 @@ export class ExecuteWorkflowTrigger implements INodeType {
 						description: 'Use all incoming data from the parent workflow',
 					},
 				],
-				default: WORKFLOW_INPUTS,
+				default: PASSTHROUGH,
 				noDataExpression: true,
 				displayOptions: {
 					show: { '@version': [{ _cnd: { gte: 1.1 } }] },
