@@ -155,6 +155,14 @@ export class TelegramPollingTrigger implements INodeType {
 						description:
 							'The user IDs to restrict the trigger to. Multiple can be defined separated by comma.',
 					},
+					{
+						displayName: 'Send Typing Indicator',
+						name: 'sendTyping',
+						type: 'boolean',
+						default: true,
+						description:
+							'Whether to show "typing..." in Telegram instantly when a message is received (like openclaw). This gives the user immediate feedback while the workflow processes.',
+					},
 				],
 			},
 		],
@@ -164,6 +172,45 @@ export class TelegramPollingTrigger implements INodeType {
 		const allowedUpdates = this.getNodeParameter('updates') as string[];
 		const additionalFields = this.getNodeParameter('additionalFields') as IDataObject;
 		const nodeStaticData = this.getWorkflowStaticData('node');
+		const sendTypingEnabled = additionalFields.sendTyping !== false; // defaults to true
+
+		// Extract chat_id from any update type for sending typing indicator
+		const extractChatId = (update: IDataObject): string | number | undefined => {
+			for (const key of ['message', 'edited_message', 'channel_post', 'edited_channel_post']) {
+				const msg = update[key] as IDataObject | undefined;
+				if (msg?.chat) {
+					return (msg.chat as IDataObject).id as number;
+				}
+			}
+			// callback_query has message.chat
+			const callbackQuery = update.callback_query as IDataObject | undefined;
+			if (callbackQuery?.message) {
+				const cbMsg = callbackQuery.message as IDataObject;
+				if (cbMsg.chat) {
+					return (cbMsg.chat as IDataObject).id as number;
+				}
+			}
+			return undefined;
+		};
+
+		// Send "typing..." indicator — fire-and-forget (don't delay workflow)
+		const sendTypingIndicator = (update: IDataObject) => {
+			if (!sendTypingEnabled) {
+				return;
+			}
+			const chatId = extractChatId(update);
+			if (chatId === undefined) {
+				return;
+			}
+			void apiRequest
+				.call(this, 'POST', 'sendChatAction', {
+					chat_id: chatId,
+					action: 'typing',
+				})
+				.catch(() => {
+					// Ignore — typing indicator is best-effort
+				});
+		};
 
 		let aborted = false;
 
@@ -256,6 +303,9 @@ export class TelegramPollingTrigger implements INodeType {
 							}
 						}
 
+						// Send typing indicator instantly (like openclaw)
+						sendTypingIndicator(update);
+
 						// Emit each matched update as a separate workflow execution
 						this.emit([this.helpers.returnJsonArray([update])]);
 					}
@@ -324,6 +374,10 @@ export class TelegramPollingTrigger implements INodeType {
 						}
 					}
 					nodeStaticData.lastUpdateId = maxUpdateId;
+					// Send typing indicator for the first update
+					if (updates.length > 0) {
+						sendTypingIndicator(updates[0] as IDataObject);
+					}
 					this.emit([this.helpers.returnJsonArray(updates)]);
 					return;
 				}
