@@ -350,7 +350,7 @@ export class CliController {
 						connections: fileData.connections,
 						settings: fileData.settings,
 						name: fileData.name,
-						updatedAt: new Date(),
+						updatedAt: fileModifiedAt ? new Date(fileModifiedAt) : new Date(),
 					});
 					return { id: existing.id };
 				} else {
@@ -397,7 +397,7 @@ export class CliController {
 						connections: fileData.connections,
 						settings: fileData.settings,
 						name: fileData.name,
-						updatedAt: new Date(),
+						updatedAt: fileModifiedAt ? new Date(fileModifiedAt) : new Date(),
 					});
 					return { id: existing.id };
 				} else {
