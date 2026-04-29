@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
 import { existsSync, statSync } from 'fs';
 import { delimiter, dirname, join } from 'path';
 
@@ -147,16 +147,49 @@ function createOpenClawProcessEnv(pathDirectories: string[]): NodeJS.ProcessEnv 
 	};
 }
 
+function killOpenClawProcess(child: ChildProcess, signal: NodeJS.Signals): void {
+	try {
+		if (child.pid && process.platform !== 'win32') {
+			process.kill(-child.pid, signal);
+			return;
+		}
+	} catch {
+		// Fall back to killing only the direct child below.
+	}
+
+	try {
+		child.kill(signal);
+	} catch {
+		// The process may have exited between timeout and signal delivery.
+	}
+}
+
+function summarizeProcessOutput(output: string): string {
+	const trimmed = output.trim();
+	if (!trimmed) {
+		return '';
+	}
+
+	const maxLength = 2000;
+	if (trimmed.length <= maxLength) {
+		return trimmed;
+	}
+
+	return `${trimmed.slice(0, maxLength)}...`;
+}
+
 async function runOpenClawCli(params: {
 	binaryPath: string;
 	args: string[];
 	cwd?: string;
+	timeoutMs: number;
 	abortSignal?: AbortSignal;
 }): Promise<OpenClawProcessResult> {
 	return await new Promise<OpenClawProcessResult>((resolve, reject) => {
 		const resolvedBinary = resolveOpenClawBinary(params.binaryPath);
 		const child = spawn(resolvedBinary.binaryPath, params.args, {
 			cwd: params.cwd,
+			detached: process.platform !== 'win32',
 			stdio: ['ignore', 'pipe', 'pipe'],
 			env: createOpenClawProcessEnv(resolvedBinary.pathDirectories),
 		});
@@ -164,11 +197,21 @@ async function runOpenClawCli(params: {
 		let stdout = '';
 		let stderr = '';
 		let aborted = false;
+		let timedOut = false;
+		let forceKillTimer: NodeJS.Timeout | undefined;
 
 		const abortHandler = () => {
 			aborted = true;
-			child.kill('SIGTERM');
+			killOpenClawProcess(child, 'SIGTERM');
 		};
+
+		const timeoutTimer = setTimeout(() => {
+			timedOut = true;
+			killOpenClawProcess(child, 'SIGTERM');
+			forceKillTimer = setTimeout(() => {
+				killOpenClawProcess(child, 'SIGKILL');
+			}, 5000);
+		}, params.timeoutMs);
 
 		params.abortSignal?.addEventListener('abort', abortHandler, { once: true });
 
@@ -181,6 +224,10 @@ async function runOpenClawCli(params: {
 		});
 
 		child.on('error', (error: Error) => {
+			clearTimeout(timeoutTimer);
+			if (forceKillTimer) {
+				clearTimeout(forceKillTimer);
+			}
 			params.abortSignal?.removeEventListener('abort', abortHandler);
 			reject(
 				new Error(
@@ -190,10 +237,27 @@ async function runOpenClawCli(params: {
 		});
 
 		child.on('close', (exitCode: number | null, signal: NodeJS.Signals | null) => {
+			clearTimeout(timeoutTimer);
+			if (forceKillTimer) {
+				clearTimeout(forceKillTimer);
+			}
 			params.abortSignal?.removeEventListener('abort', abortHandler);
 
 			if (aborted) {
 				reject(new Error('OpenClaw CLI execution was cancelled'));
+				return;
+			}
+
+			if (timedOut) {
+				const stderrSummary = summarizeProcessOutput(stderr);
+				const stdoutSummary = summarizeProcessOutput(stdout);
+				const details =
+					stderrSummary || stdoutSummary ? ` Last output: ${stderrSummary || stdoutSummary}` : '';
+				reject(
+					new Error(
+						`OpenClaw CLI did not finish within ${Math.ceil(params.timeoutMs / 1000)} seconds and was stopped.${details}`,
+					),
+				);
 				return;
 			}
 
@@ -383,8 +447,9 @@ export class OpenClawAgent implements INodeType {
 						displayName: 'Timeout',
 						name: 'timeout',
 						type: 'number',
-						default: 600,
-						description: 'OpenClaw agent timeout in seconds',
+						default: 120,
+						description:
+							'Maximum time in seconds to wait for OpenClaw. The node stops the OpenClaw process if it does not finish in time.',
 						typeOptions: {
 							minValue: 1,
 						},
@@ -487,10 +552,9 @@ export class OpenClawAgent implements INodeType {
 					args.push('--deliver');
 				}
 
-				const timeout = Number(this.getNodeParameter('options.timeout', itemIndex, 600));
-				if (Number.isFinite(timeout) && timeout > 0) {
-					args.push('--timeout', String(Math.floor(timeout)));
-				}
+				const timeout = Number(this.getNodeParameter('options.timeout', itemIndex, 120));
+				const timeoutSeconds = Number.isFinite(timeout) && timeout > 0 ? Math.floor(timeout) : 120;
+				args.push('--timeout', String(timeoutSeconds));
 
 				const channel = normalizeOptionalString(
 					this.getNodeParameter('options.channel', itemIndex, ''),
@@ -549,6 +613,7 @@ export class OpenClawAgent implements INodeType {
 					binaryPath,
 					args,
 					cwd: workingDirectory,
+					timeoutMs: timeoutSeconds * 1000,
 					abortSignal: this.getExecutionCancelSignal(),
 				});
 
