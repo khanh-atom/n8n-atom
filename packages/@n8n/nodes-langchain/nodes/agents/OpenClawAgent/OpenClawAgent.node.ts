@@ -1,0 +1,594 @@
+import { spawn } from 'child_process';
+import { existsSync, statSync } from 'fs';
+import { delimiter, dirname, join } from 'path';
+
+import {
+	NodeConnectionTypes,
+	NodeOperationError,
+	jsonParse,
+	type IDataObject,
+	type IExecuteFunctions,
+	type INodeExecutionData,
+	type INodeType,
+	type INodeTypeDescription,
+} from 'n8n-workflow';
+
+interface OpenClawProcessResult {
+	stdout: string;
+	stderr: string;
+	exitCode: number | null;
+	signal: NodeJS.Signals | null;
+}
+
+interface ResolvedBinary {
+	binaryPath: string;
+	pathDirectories: string[];
+}
+
+type SelectorType = 'agent' | 'sessionId' | 'recipient' | 'default';
+
+const selectorTypeToParameterName: Record<Exclude<SelectorType, 'default'>, string> = {
+	agent: 'agentId',
+	sessionId: 'sessionId',
+	recipient: 'to',
+};
+
+const selectorTypeToCliFlag: Record<Exclude<SelectorType, 'default'>, string> = {
+	agent: '--agent',
+	sessionId: '--session-id',
+	recipient: '--to',
+};
+
+function isObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function getErrorMessage(error: unknown): string {
+	if (error instanceof Error) {
+		return error.message;
+	}
+
+	return String(error);
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+	if (typeof value !== 'string') {
+		return undefined;
+	}
+
+	const trimmed = value.trim();
+	return trimmed || undefined;
+}
+
+function parseOpenClawOutput(stdout: string): IDataObject {
+	const trimmed = stdout.trim();
+	if (!trimmed) {
+		return {};
+	}
+
+	const parsed = jsonParse<unknown>(trimmed);
+	if (isObject(parsed)) {
+		return parsed as IDataObject;
+	}
+
+	return { result: parsed as object };
+}
+
+function isUsableFile(filePath: string): boolean {
+	try {
+		return existsSync(filePath) && statSync(filePath).isFile();
+	} catch {
+		return false;
+	}
+}
+
+function getHomeDirectory(): string | undefined {
+	return (
+		normalizeOptionalString(process.env.HOME) ?? normalizeOptionalString(process.env.USERPROFILE)
+	);
+}
+
+function getDefaultBinarySearchPaths(binaryName: string): string[] {
+	const home = getHomeDirectory();
+	const homeCandidates = home
+		? [
+				join(home, '.volta', 'bin', binaryName),
+				join(home, '.local', 'bin', binaryName),
+				join(home, '.npm-global', 'bin', binaryName),
+				join(home, '.bun', 'bin', binaryName),
+				join(home, 'Library', 'pnpm', binaryName),
+			]
+		: [];
+
+	return [
+		normalizeOptionalString(process.env.OPENCLAW_BINARY_PATH),
+		normalizeOptionalString(process.env.OPENCLAW_BIN),
+		...(process.env.PATH ?? '')
+			.split(delimiter)
+			.filter(Boolean)
+			.map((pathDirectory) => join(pathDirectory, binaryName)),
+		...homeCandidates,
+		join('/opt/homebrew/bin', binaryName),
+		join('/usr/local/bin', binaryName),
+	].filter((candidate): candidate is string => typeof candidate === 'string');
+}
+
+function resolveOpenClawBinary(binaryPath: string): ResolvedBinary {
+	if (binaryPath.includes('/') || binaryPath.includes('\\')) {
+		return {
+			binaryPath,
+			pathDirectories: [dirname(binaryPath)],
+		};
+	}
+
+	for (const candidate of getDefaultBinarySearchPaths(binaryPath)) {
+		if (isUsableFile(candidate)) {
+			return {
+				binaryPath: candidate,
+				pathDirectories: [dirname(candidate)],
+			};
+		}
+	}
+
+	return {
+		binaryPath,
+		pathDirectories: [],
+	};
+}
+
+function createOpenClawProcessEnv(pathDirectories: string[]): NodeJS.ProcessEnv {
+	const existingPath = process.env.PATH ?? '';
+	const prependedPath = pathDirectories.filter(Boolean).join(delimiter);
+	const nextPath = prependedPath ? `${prependedPath}${delimiter}${existingPath}` : existingPath;
+
+	return {
+		...process.env,
+		PATH: nextPath,
+	};
+}
+
+async function runOpenClawCli(params: {
+	binaryPath: string;
+	args: string[];
+	cwd?: string;
+	abortSignal?: AbortSignal;
+}): Promise<OpenClawProcessResult> {
+	return await new Promise<OpenClawProcessResult>((resolve, reject) => {
+		const resolvedBinary = resolveOpenClawBinary(params.binaryPath);
+		const child = spawn(resolvedBinary.binaryPath, params.args, {
+			cwd: params.cwd,
+			stdio: ['ignore', 'pipe', 'pipe'],
+			env: createOpenClawProcessEnv(resolvedBinary.pathDirectories),
+		});
+
+		let stdout = '';
+		let stderr = '';
+		let aborted = false;
+
+		const abortHandler = () => {
+			aborted = true;
+			child.kill('SIGTERM');
+		};
+
+		params.abortSignal?.addEventListener('abort', abortHandler, { once: true });
+
+		child.stdout.on('data', (data: Buffer) => {
+			stdout += data.toString();
+		});
+
+		child.stderr.on('data', (data: Buffer) => {
+			stderr += data.toString();
+		});
+
+		child.on('error', (error: Error) => {
+			params.abortSignal?.removeEventListener('abort', abortHandler);
+			reject(
+				new Error(
+					`Failed to spawn OpenClaw CLI at "${resolvedBinary.binaryPath}": ${error.message}. Set Options > Binary Path to the full path of the openclaw executable, or set OPENCLAW_BINARY_PATH in the n8n process environment.`,
+				),
+			);
+		});
+
+		child.on('close', (exitCode: number | null, signal: NodeJS.Signals | null) => {
+			params.abortSignal?.removeEventListener('abort', abortHandler);
+
+			if (aborted) {
+				reject(new Error('OpenClaw CLI execution was cancelled'));
+				return;
+			}
+
+			resolve({ stdout, stderr, exitCode, signal });
+		});
+	});
+}
+
+export class OpenClawAgent implements INodeType {
+	description: INodeTypeDescription = {
+		displayName: 'OpenClaw AI Agent',
+		name: 'openClawAgent',
+		icon: 'file:openclaw.svg',
+		group: ['transform'],
+		version: 1,
+		description: 'Runs a one-shot OpenClaw agent turn through the OpenClaw CLI',
+		subtitle:
+			'={{$parameter.selectorType === "agent" ? "Agent: " + $parameter.agentId : $parameter.selectorType === "sessionId" ? "Session: " + $parameter.sessionId : $parameter.selectorType === "recipient" ? "To: " + $parameter.to : "Default route"}}',
+		defaults: {
+			name: 'OpenClaw AI Agent',
+		},
+		codex: {
+			alias: ['OpenClaw', 'Agent', 'Gateway', 'Assistant'],
+			categories: ['AI'],
+			subcategories: {
+				AI: ['Agents', 'Root Nodes'],
+			},
+			resources: {
+				primaryDocumentation: [
+					{
+						url: 'https://docs.openclaw.ai/cli/agent',
+					},
+				],
+			},
+		},
+		inputs: [NodeConnectionTypes.Main],
+		outputs: [NodeConnectionTypes.Main],
+		properties: [
+			{
+				displayName:
+					'Requires the OpenClaw CLI to be installed and configured on the n8n host. The node runs <code>openclaw agent --json</code> and returns OpenClaw payloads and metadata.',
+				name: 'openClawNotice',
+				type: 'notice',
+				default: '',
+			},
+			{
+				displayName: 'Message',
+				name: 'message',
+				type: 'string',
+				required: true,
+				default: '={{ $json.chatInput || $json.chat_input || $json.message || $json.text || "" }}',
+				description: 'Message body to send to the OpenClaw agent',
+				typeOptions: {
+					rows: 5,
+				},
+			},
+			{
+				displayName: 'Route By',
+				name: 'selectorType',
+				type: 'options',
+				default: 'agent',
+				noDataExpression: true,
+				description: 'How to target the OpenClaw agent turn',
+				options: [
+					{
+						name: 'Agent ID',
+						value: 'agent',
+						description: 'Run against a configured OpenClaw agent',
+					},
+					{
+						name: 'Existing Session ID',
+						value: 'sessionId',
+						description: 'Continue an existing OpenClaw session',
+					},
+					{
+						name: 'Recipient',
+						value: 'recipient',
+						description: 'Use a recipient/channel target to derive the session',
+					},
+					{
+						name: 'OpenClaw Default',
+						value: 'default',
+						description: 'Let OpenClaw choose its default route',
+					},
+				],
+			},
+			{
+				displayName: 'Agent ID',
+				name: 'agentId',
+				type: 'string',
+				default: 'main',
+				description: 'Configured OpenClaw agent ID',
+				displayOptions: {
+					show: {
+						selectorType: ['agent'],
+					},
+				},
+			},
+			{
+				displayName: 'Session ID',
+				name: 'sessionId',
+				type: 'string',
+				default: '',
+				description: 'OpenClaw session ID to continue',
+				displayOptions: {
+					show: {
+						selectorType: ['sessionId'],
+					},
+				},
+			},
+			{
+				displayName: 'Recipient',
+				name: 'to',
+				type: 'string',
+				default: '',
+				description: 'Recipient or channel target passed to OpenClaw as --to',
+				displayOptions: {
+					show: {
+						selectorType: ['recipient'],
+					},
+				},
+			},
+			{
+				displayName: 'Model',
+				name: 'model',
+				type: 'string',
+				default: '',
+				description:
+					'Optional model override for this run. Use an OpenClaw model reference such as openai/gpt-5.4.',
+			},
+			{
+				displayName: 'Thinking Level',
+				name: 'thinking',
+				type: 'options',
+				default: '',
+				description: 'Optional OpenClaw thinking level override for this run',
+				options: [
+					{ name: 'Adaptive', value: 'adaptive' },
+					{ name: 'Extra High', value: 'xhigh' },
+					{ name: 'High', value: 'high' },
+					{ name: 'Low', value: 'low' },
+					{ name: 'Max', value: 'max' },
+					{ name: 'Medium', value: 'medium' },
+					{ name: 'Minimal', value: 'minimal' },
+					{ name: 'Off', value: 'off' },
+					{ name: 'Use OpenClaw Default', value: '' },
+				],
+			},
+			{
+				displayName: 'Run Locally',
+				name: 'local',
+				type: 'boolean',
+				default: false,
+				description: 'Whether to force OpenClaw embedded local runtime instead of Gateway mode',
+			},
+			{
+				displayName: 'Deliver Reply',
+				name: 'deliver',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether OpenClaw should deliver the reply back to the selected channel/target',
+			},
+			{
+				displayName: 'Options',
+				name: 'options',
+				type: 'collection',
+				placeholder: 'Add Option',
+				default: {},
+				options: [
+					{
+						displayName: 'Binary Path',
+						name: 'binaryPath',
+						type: 'string',
+						default: 'openclaw',
+						description: 'Path to the openclaw binary. Defaults to "openclaw" in PATH.',
+					},
+					{
+						displayName: 'Working Directory',
+						name: 'workingDirectory',
+						type: 'string',
+						default: '',
+						description:
+							'Working directory for the OpenClaw process. Leave empty to use n8n default.',
+					},
+					{
+						displayName: 'Timeout',
+						name: 'timeout',
+						type: 'number',
+						default: 600,
+						description: 'OpenClaw agent timeout in seconds',
+						typeOptions: {
+							minValue: 1,
+						},
+					},
+					{
+						displayName: 'Channel',
+						name: 'channel',
+						type: 'string',
+						default: '',
+						description: 'Delivery channel passed to OpenClaw as --channel',
+					},
+					{
+						displayName: 'Reply To',
+						name: 'replyTo',
+						type: 'string',
+						default: '',
+						description: 'Delivery target override passed to OpenClaw as --reply-to',
+					},
+					{
+						displayName: 'Reply Channel',
+						name: 'replyChannel',
+						type: 'string',
+						default: '',
+						description: 'Delivery channel override passed to OpenClaw as --reply-channel',
+					},
+					{
+						displayName: 'Reply Account',
+						name: 'replyAccount',
+						type: 'string',
+						default: '',
+						description: 'Delivery account ID override passed to OpenClaw as --reply-account',
+					},
+					{
+						displayName: 'Verbose',
+						name: 'verbose',
+						type: 'options',
+						default: '',
+						description: 'Optional OpenClaw verbose setting to persist for the session',
+						options: [
+							{ name: 'Full', value: 'full' },
+							{ name: 'Leave Unchanged', value: '' },
+							{ name: 'Off', value: 'off' },
+							{ name: 'On', value: 'on' },
+						],
+					},
+					{
+						displayName: 'Include Raw Output',
+						name: 'includeRawOutput',
+						type: 'boolean',
+						default: false,
+						description:
+							'Whether to include raw stdout and stderr from the OpenClaw CLI in the output',
+					},
+				],
+			},
+		],
+	};
+
+	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
+		const items = this.getInputData();
+		const returnData: INodeExecutionData[] = [];
+
+		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+			try {
+				const message = normalizeOptionalString(this.getNodeParameter('message', itemIndex));
+				if (!message) {
+					throw new NodeOperationError(this.getNode(), 'Message must not be empty', { itemIndex });
+				}
+
+				const args = ['agent', '--message', message, '--json'];
+				const selectorType = this.getNodeParameter('selectorType', itemIndex) as SelectorType;
+				if (selectorType !== 'default') {
+					const parameterName = selectorTypeToParameterName[selectorType];
+					const value = normalizeOptionalString(this.getNodeParameter(parameterName, itemIndex));
+					if (!value) {
+						throw new NodeOperationError(
+							this.getNode(),
+							`${parameterName} must not be empty when Route By is ${selectorType}`,
+							{ itemIndex },
+						);
+					}
+					args.push(selectorTypeToCliFlag[selectorType], value);
+				}
+
+				const model = normalizeOptionalString(this.getNodeParameter('model', itemIndex));
+				if (model) {
+					args.push('--model', model);
+				}
+
+				const thinking = normalizeOptionalString(this.getNodeParameter('thinking', itemIndex));
+				if (thinking) {
+					args.push('--thinking', thinking);
+				}
+
+				if (this.getNodeParameter('local', itemIndex, false) === true) {
+					args.push('--local');
+				}
+
+				if (this.getNodeParameter('deliver', itemIndex, false) === true) {
+					args.push('--deliver');
+				}
+
+				const timeout = Number(this.getNodeParameter('options.timeout', itemIndex, 600));
+				if (Number.isFinite(timeout) && timeout > 0) {
+					args.push('--timeout', String(Math.floor(timeout)));
+				}
+
+				const channel = normalizeOptionalString(
+					this.getNodeParameter('options.channel', itemIndex, ''),
+				);
+				if (channel) {
+					args.push('--channel', channel);
+				}
+
+				const replyTo = normalizeOptionalString(
+					this.getNodeParameter('options.replyTo', itemIndex, ''),
+				);
+				if (replyTo) {
+					args.push('--reply-to', replyTo);
+				}
+
+				const replyChannel = normalizeOptionalString(
+					this.getNodeParameter('options.replyChannel', itemIndex, ''),
+				);
+				if (replyChannel) {
+					args.push('--reply-channel', replyChannel);
+				}
+
+				const replyAccount = normalizeOptionalString(
+					this.getNodeParameter('options.replyAccount', itemIndex, ''),
+				);
+				if (replyAccount) {
+					args.push('--reply-account', replyAccount);
+				}
+
+				const verbose = normalizeOptionalString(
+					this.getNodeParameter('options.verbose', itemIndex, ''),
+				);
+				if (verbose) {
+					args.push('--verbose', verbose);
+				}
+
+				const binaryPath =
+					normalizeOptionalString(this.getNodeParameter('options.binaryPath', itemIndex, '')) ??
+					'openclaw';
+				const workingDirectory = normalizeOptionalString(
+					this.getNodeParameter('options.workingDirectory', itemIndex, ''),
+				);
+
+				if (
+					workingDirectory &&
+					(!existsSync(workingDirectory) || !statSync(workingDirectory).isDirectory())
+				) {
+					throw new NodeOperationError(
+						this.getNode(),
+						`Working directory does not exist or is not a directory: ${workingDirectory}`,
+						{ itemIndex },
+					);
+				}
+
+				const result = await runOpenClawCli({
+					binaryPath,
+					args,
+					cwd: workingDirectory,
+					abortSignal: this.getExecutionCancelSignal(),
+				});
+
+				if (result.exitCode !== 0) {
+					const messageFromStderr = result.stderr.trim();
+					const messageFromStdout = result.stdout.trim();
+					throw new NodeOperationError(
+						this.getNode(),
+						messageFromStderr ||
+							messageFromStdout ||
+							`OpenClaw CLI exited with code ${result.exitCode ?? `signal ${result.signal}`}`,
+						{ itemIndex },
+					);
+				}
+
+				const json = parseOpenClawOutput(result.stdout);
+				if (this.getNodeParameter('options.includeRawOutput', itemIndex, false) === true) {
+					json.rawOutput = {
+						stdout: result.stdout,
+						stderr: result.stderr,
+					};
+				}
+
+				returnData.push({
+					json,
+					pairedItem: { item: itemIndex },
+				});
+			} catch (error) {
+				if (this.continueOnFail()) {
+					returnData.push({
+						json: { error: getErrorMessage(error) },
+						pairedItem: { item: itemIndex },
+					});
+					continue;
+				}
+
+				throw error;
+			}
+		}
+
+		return [returnData];
+	}
+}
