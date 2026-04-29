@@ -39,6 +39,9 @@ const selectorTypeToCliFlag: Record<Exclude<SelectorType, 'default'>, string> = 
 	recipient: '--to',
 };
 
+const DEFAULT_TIMEOUT_SECONDS = 300;
+const CLI_SHUTDOWN_GRACE_SECONDS = 90;
+
 function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -176,6 +179,12 @@ function summarizeProcessOutput(output: string): string {
 	}
 
 	return `${trimmed.slice(0, maxLength)}...`;
+}
+
+function getWatchdogTimeoutMs(timeoutSeconds: number): number {
+	// OpenClaw may use the CLI timeout for the agent turn while still needing time
+	// to return the gateway result and clean up local resources.
+	return (timeoutSeconds + CLI_SHUTDOWN_GRACE_SECONDS) * 1000;
 }
 
 async function runOpenClawCli(params: {
@@ -447,9 +456,9 @@ export class OpenClawAgent implements INodeType {
 						displayName: 'Timeout',
 						name: 'timeout',
 						type: 'number',
-						default: 120,
+						default: DEFAULT_TIMEOUT_SECONDS,
 						description:
-							'Maximum time in seconds to wait for OpenClaw. The node stops the OpenClaw process if it does not finish in time.',
+							'OpenClaw agent timeout in seconds. The node allows extra time for the CLI to return the final gateway result before stopping the process.',
 						typeOptions: {
 							minValue: 1,
 						},
@@ -552,8 +561,11 @@ export class OpenClawAgent implements INodeType {
 					args.push('--deliver');
 				}
 
-				const timeout = Number(this.getNodeParameter('options.timeout', itemIndex, 120));
-				const timeoutSeconds = Number.isFinite(timeout) && timeout > 0 ? Math.floor(timeout) : 120;
+				const timeout = Number(
+					this.getNodeParameter('options.timeout', itemIndex, DEFAULT_TIMEOUT_SECONDS),
+				);
+				const timeoutSeconds =
+					Number.isFinite(timeout) && timeout > 0 ? Math.floor(timeout) : DEFAULT_TIMEOUT_SECONDS;
 				args.push('--timeout', String(timeoutSeconds));
 
 				const channel = normalizeOptionalString(
@@ -613,7 +625,7 @@ export class OpenClawAgent implements INodeType {
 					binaryPath,
 					args,
 					cwd: workingDirectory,
-					timeoutMs: timeoutSeconds * 1000,
+					timeoutMs: getWatchdogTimeoutMs(timeoutSeconds),
 					abortSignal: this.getExecutionCancelSignal(),
 				});
 
