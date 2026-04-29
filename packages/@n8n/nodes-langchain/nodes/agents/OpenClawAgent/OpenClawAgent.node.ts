@@ -339,17 +339,6 @@ export class OpenClawAgent implements INodeType {
 				},
 			},
 			{
-				displayName: 'System Message',
-				name: 'systemMessage',
-				type: 'string',
-				default: '',
-				description:
-					'Additional system instructions for this OpenClaw run. When set, the node sends the run through the OpenClaw Gateway agent RPC so the instructions are passed as extraSystemPrompt.',
-				typeOptions: {
-					rows: 5,
-				},
-			},
-			{
 				displayName: 'Route By',
 				name: 'selectorType',
 				type: 'options',
@@ -463,6 +452,17 @@ export class OpenClawAgent implements INodeType {
 				placeholder: 'Add Option',
 				default: {},
 				options: [
+					{
+						displayName: 'System Message',
+						name: 'systemMessage',
+						type: 'string',
+						default: '',
+						description:
+							'Additional system instructions for this OpenClaw run. When set, the node sends the run through the OpenClaw Gateway agent RPC so the instructions are passed as extraSystemPrompt.',
+						typeOptions: {
+							rows: 5,
+						},
+					},
 					{
 						displayName: 'Binary Path',
 						name: 'binaryPath',
@@ -668,7 +668,7 @@ export class OpenClawAgent implements INodeType {
 				}
 
 				const systemMessage = normalizeOptionalString(
-					this.getNodeParameter('systemMessage', itemIndex, ''),
+					this.getNodeParameter('options.systemMessage', itemIndex, ''),
 				);
 				if (systemMessage) {
 					if (this.getNodeParameter('local', itemIndex, false) === true) {
