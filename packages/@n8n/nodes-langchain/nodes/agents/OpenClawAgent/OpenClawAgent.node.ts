@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'child_process';
+import { randomUUID } from 'crypto';
 import { existsSync, statSync } from 'fs';
 import { delimiter, dirname, join } from 'path';
 
@@ -187,6 +188,20 @@ function getWatchdogTimeoutMs(timeoutSeconds: number): number {
 	return (timeoutSeconds + CLI_SHUTDOWN_GRACE_SECONDS) * 1000;
 }
 
+function getGatewayCallArgs(params: IDataObject, rpcTimeoutMs: number): string[] {
+	return [
+		'gateway',
+		'call',
+		'agent',
+		'--expect-final',
+		'--json',
+		'--timeout',
+		String(rpcTimeoutMs),
+		'--params',
+		JSON.stringify(params),
+	];
+}
+
 async function runOpenClawCli(params: {
 	binaryPath: string;
 	args: string[];
@@ -319,6 +334,17 @@ export class OpenClawAgent implements INodeType {
 				required: true,
 				default: '={{ $json.chatInput || $json.chat_input || $json.message || $json.text || "" }}',
 				description: 'Message body to send to the OpenClaw agent',
+				typeOptions: {
+					rows: 5,
+				},
+			},
+			{
+				displayName: 'System Message',
+				name: 'systemMessage',
+				type: 'string',
+				default: '',
+				description:
+					'Additional system instructions for this OpenClaw run. When set, the node sends the run through the OpenClaw Gateway agent RPC so the instructions are passed as extraSystemPrompt.',
 				typeOptions: {
 					rows: 5,
 				},
@@ -528,7 +554,12 @@ export class OpenClawAgent implements INodeType {
 					throw new NodeOperationError(this.getNode(), 'Message must not be empty', { itemIndex });
 				}
 
-				const args = ['agent', '--message', message, '--json'];
+				let args = ['agent', '--message', message, '--json'];
+				let processTimeoutMs: number | undefined;
+				const gatewayParams: IDataObject = {
+					message,
+					idempotencyKey: randomUUID(),
+				};
 				const selectorType = this.getNodeParameter('selectorType', itemIndex) as SelectorType;
 				if (selectorType !== 'default') {
 					const parameterName = selectorTypeToParameterName[selectorType];
@@ -541,16 +572,25 @@ export class OpenClawAgent implements INodeType {
 						);
 					}
 					args.push(selectorTypeToCliFlag[selectorType], value);
+					if (selectorType === 'agent') {
+						gatewayParams.agentId = value;
+					} else if (selectorType === 'sessionId') {
+						gatewayParams.sessionId = value;
+					} else {
+						gatewayParams.to = value;
+					}
 				}
 
 				const model = normalizeOptionalString(this.getNodeParameter('model', itemIndex));
 				if (model) {
 					args.push('--model', model);
+					gatewayParams.model = model;
 				}
 
 				const thinking = normalizeOptionalString(this.getNodeParameter('thinking', itemIndex));
 				if (thinking) {
 					args.push('--thinking', thinking);
+					gatewayParams.thinking = thinking;
 				}
 
 				if (this.getNodeParameter('local', itemIndex, false) === true) {
@@ -559,6 +599,7 @@ export class OpenClawAgent implements INodeType {
 
 				if (this.getNodeParameter('deliver', itemIndex, false) === true) {
 					args.push('--deliver');
+					gatewayParams.deliver = true;
 				}
 
 				const timeout = Number(
@@ -567,12 +608,14 @@ export class OpenClawAgent implements INodeType {
 				const timeoutSeconds =
 					Number.isFinite(timeout) && timeout > 0 ? Math.floor(timeout) : DEFAULT_TIMEOUT_SECONDS;
 				args.push('--timeout', String(timeoutSeconds));
+				gatewayParams.timeout = timeoutSeconds;
 
 				const channel = normalizeOptionalString(
 					this.getNodeParameter('options.channel', itemIndex, ''),
 				);
 				if (channel) {
 					args.push('--channel', channel);
+					gatewayParams.channel = channel;
 				}
 
 				const replyTo = normalizeOptionalString(
@@ -580,6 +623,7 @@ export class OpenClawAgent implements INodeType {
 				);
 				if (replyTo) {
 					args.push('--reply-to', replyTo);
+					gatewayParams.replyTo = replyTo;
 				}
 
 				const replyChannel = normalizeOptionalString(
@@ -587,6 +631,7 @@ export class OpenClawAgent implements INodeType {
 				);
 				if (replyChannel) {
 					args.push('--reply-channel', replyChannel);
+					gatewayParams.replyChannel = replyChannel;
 				}
 
 				const replyAccount = normalizeOptionalString(
@@ -594,6 +639,7 @@ export class OpenClawAgent implements INodeType {
 				);
 				if (replyAccount) {
 					args.push('--reply-account', replyAccount);
+					gatewayParams.replyAccountId = replyAccount;
 				}
 
 				const verbose = normalizeOptionalString(
@@ -621,11 +667,29 @@ export class OpenClawAgent implements INodeType {
 					);
 				}
 
+				const systemMessage = normalizeOptionalString(
+					this.getNodeParameter('systemMessage', itemIndex, ''),
+				);
+				if (systemMessage) {
+					if (this.getNodeParameter('local', itemIndex, false) === true) {
+						throw new NodeOperationError(
+							this.getNode(),
+							'System Message is only supported in OpenClaw Gateway mode. Disable Run Locally to use it.',
+							{ itemIndex },
+						);
+					}
+
+					gatewayParams.extraSystemPrompt = systemMessage;
+					const rpcTimeoutMs = getWatchdogTimeoutMs(timeoutSeconds);
+					args = getGatewayCallArgs(gatewayParams, rpcTimeoutMs);
+					processTimeoutMs = rpcTimeoutMs + 10_000;
+				}
+
 				const result = await runOpenClawCli({
 					binaryPath,
 					args,
 					cwd: workingDirectory,
-					timeoutMs: getWatchdogTimeoutMs(timeoutSeconds),
+					timeoutMs: processTimeoutMs ?? getWatchdogTimeoutMs(timeoutSeconds),
 					abortSignal: this.getExecutionCancelSignal(),
 				});
 
