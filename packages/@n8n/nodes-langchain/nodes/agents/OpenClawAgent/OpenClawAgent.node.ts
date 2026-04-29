@@ -393,9 +393,9 @@ export class OpenClawAgent implements INodeType {
 				displayName: 'Model',
 				name: 'model',
 				type: 'string',
-				default: '',
+				default: 'openai-codex/gpt-5.5',
 				description:
-					'Optional model override for this run. Use an OpenClaw model reference such as openai/gpt-5.4.',
+					'Model override for this run. Use an OpenClaw model reference such as openai-codex/gpt-5.5.',
 			},
 			{
 				displayName: 'Thinking Level',
