@@ -62,6 +62,8 @@
       "dist/nodes/agents/Agent/AgentTool.node.js",
       "dist/nodes/agents/OpenAiAssistant/OpenAiAssistant.node.js",
       "dist/nodes/agents/OpenClawAgent/OpenClawAgent.node.js",
+      "dist/nodes/agents/OpenClawAgent/channels/TelegramChannel/TelegramChannel.node.js",
+      "dist/nodes/agents/OpenClawAgent/channels/WhatsAppChannel/WhatsAppChannel.node.js",
       "dist/nodes/chains/ChainSummarization/ChainSummarization.node.js",
       "dist/nodes/chains/ChainLLM/ChainLlm.node.js",
       "dist/nodes/chains/ChainRetrievalQA/ChainRetrievalQa.node.js",
