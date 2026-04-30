@@ -19,6 +19,7 @@ interface OpenClawProcessResult {
 	stderr: string;
 	exitCode: number | null;
 	signal: NodeJS.Signals | null;
+	command: string;
 }
 
 interface ResolvedBinary {
@@ -202,6 +203,18 @@ function getGatewayCallArgs(params: IDataObject, rpcTimeoutMs: number): string[]
 	];
 }
 
+function quoteCommandArgument(value: string): string {
+	if (/^[A-Za-z0-9_/:=-]+$/.test(value)) {
+		return value;
+	}
+
+	return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function getOpenClawCommand(binaryPath: string, args: string[]): string {
+	return [binaryPath, ...args].map(quoteCommandArgument).join(' ');
+}
+
 async function runOpenClawCli(params: {
 	binaryPath: string;
 	args: string[];
@@ -211,6 +224,7 @@ async function runOpenClawCli(params: {
 }): Promise<OpenClawProcessResult> {
 	return await new Promise<OpenClawProcessResult>((resolve, reject) => {
 		const resolvedBinary = resolveOpenClawBinary(params.binaryPath);
+		const command = getOpenClawCommand(resolvedBinary.binaryPath, params.args);
 		const child = spawn(resolvedBinary.binaryPath, params.args, {
 			cwd: params.cwd,
 			detached: process.platform !== 'win32',
@@ -285,7 +299,7 @@ async function runOpenClawCli(params: {
 				return;
 			}
 
-			resolve({ stdout, stderr, exitCode, signal });
+			resolve({ stdout, stderr, exitCode, signal, command });
 		});
 	});
 }
@@ -706,6 +720,7 @@ export class OpenClawAgent implements INodeType {
 				}
 
 				const json = parseOpenClawOutput(result.stdout);
+				json.command = result.command;
 				if (this.getNodeParameter('options.includeRawOutput', itemIndex, false) === true) {
 					json.rawOutput = {
 						stdout: result.stdout,
