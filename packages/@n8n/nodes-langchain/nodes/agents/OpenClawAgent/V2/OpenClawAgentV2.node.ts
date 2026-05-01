@@ -194,6 +194,48 @@ function syncChannelConfig(params: {
 	return { accountId, changed, configPath };
 }
 
+/**
+ * Persists the model selection for a specific OpenClaw agent to openclaw.json.
+ * Writes: config.agents.<agentId>.model = modelId
+ * This mirrors how syncChannelConfig() persists channel settings.
+ */
+function syncModelConfig(params: {
+	agentId: string;
+	modelId: string;
+}): { changed: boolean; configPath: string } {
+	const configPath = getOpenClawConfigPath();
+	if (!configPath) {
+		throw new ApplicationError(
+			`Could not determine OpenClaw config path. Set ${OPENCLAW_CONFIG_PATH_ENV} or HOME for the n8n process.`,
+		);
+	}
+
+	const config = readOpenClawConfig(configPath);
+	const agents = ensureDataObject(config, 'agents');
+	const agentEntry = ensureDataObject(agents, params.agentId);
+
+	let changed = false;
+	changed = setConfigValue(agentEntry, 'model', params.modelId) || changed;
+
+	console.log('[OpenClawAgentV2] syncModelConfig', {
+		agentId: params.agentId,
+		modelId: params.modelId,
+		changed,
+		configPath,
+	});
+
+	if (changed) {
+		mkdirSync(dirname(configPath), { recursive: true });
+		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+		console.log('[OpenClawAgentV2] openclaw.json updated with model config', {
+			agentId: params.agentId,
+			modelId: params.modelId,
+			configPath,
+		});
+	}
+	return { changed, configPath };
+}
+
 function parseOpenClawOutput(stdout: string): IDataObject {
 	const trimmed = stdout.trim();
 	if (!trimmed) {
@@ -730,6 +772,25 @@ export class OpenClawAgentV2 implements INodeType {
 				if (resolvedModel) {
 					args.push('--model', resolvedModel);
 					gatewayParams.model = resolvedModel;
+				}
+
+				// Persist model to openclaw.json when a Model sub-node is connected
+				// Only write when selectorType === 'agent' so we have a stable agentId.
+				// Uses the same gateway-restart pattern as channel config sync.
+				if (modelConfig && resolvedModel && selectorType === 'agent') {
+					const agentIdForModel =
+						normalizeOptionalString(
+							this.getNodeParameter(selectorTypeToParameterName.agent, itemIndex),
+						) ?? 'main';
+					console.log('[OpenClawAgentV2] Syncing model to openclaw.json', {
+						agentId: agentIdForModel,
+						modelId: resolvedModel,
+					});
+					const modelSync = syncModelConfig({
+						agentId: agentIdForModel,
+						modelId: resolvedModel,
+					});
+					configChanged = modelSync.changed || configChanged;
 				}
 
 				const thinking = normalizeOptionalString(this.getNodeParameter('thinking', itemIndex));
