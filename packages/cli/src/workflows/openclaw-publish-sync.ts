@@ -9,6 +9,10 @@ const OPENCLAW_OPEN_CODE_FREE_MODEL_NODE_TYPE =
 const OPENCLAW_CONFIG_PATH_ENV = 'OPENCLAW_CONFIG_PATH';
 const OPENCLAW_DEFAULT_AGENT_ID = 'main';
 const OPENCLAW_DEFAULT_OPEN_CODE_MODEL = 'opencode/big-pickle';
+const OPENCLAW_OPEN_CODE_FREE_PROVIDER = 'opencode';
+const OPENCLAW_OPEN_CODE_FREE_ENV_VAR = 'OPENCODE_API_KEY';
+const OPENCLAW_OPEN_CODE_FREE_ENV_ALIAS = 'OPENCODE_ZEN_API_KEY';
+const OPENCLAW_OPEN_CODE_FREE_PUBLIC_KEY = 'public';
 
 export type OpenClawModelSyncCandidate = {
 	agentNodeName: string;
@@ -54,6 +58,14 @@ export type OpenClawModelSyncResult = OpenClawModelSyncCandidate & {
 	changed: boolean;
 	existingModel?: string;
 	targetPath: string;
+	openCodeFreeAuth?: OpenClawOpenCodeFreeAuthSyncResult;
+};
+
+export type OpenClawOpenCodeFreeAuthSyncResult = {
+	changed: boolean;
+	envVar: string;
+	targetPath?: string;
+	reason: 'configured-public-env' | 'existing-auth' | 'not-open-code-free';
 };
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -133,6 +145,84 @@ function getModelPrimary(value: unknown): string | undefined {
 		return normalizeOptionalString(value.primary);
 	}
 	return undefined;
+}
+
+function getModelProvider(value: string): string | undefined {
+	return normalizeOptionalString(value.split('/')[0]);
+}
+
+function isOpenCodeFreeModelCandidate(candidate: OpenClawModelSyncCandidate): boolean {
+	return (
+		candidate.source === 'connected-model' &&
+		normalizeLowercaseStringOrEmpty(getModelProvider(candidate.modelId)) ===
+			OPENCLAW_OPEN_CODE_FREE_PROVIDER
+	);
+}
+
+function hasConfigEnvValue(config: IDataObject, envVar: string): boolean {
+	const env = config.env;
+	if (!isObject(env)) {
+		return false;
+	}
+	if (normalizeOptionalString(env[envVar])) {
+		return true;
+	}
+	const vars = env.vars;
+	return isObject(vars) && normalizeOptionalString(vars[envVar]) !== undefined;
+}
+
+function hasConfiguredOpenCodeAuth(config: IDataObject): boolean {
+	if (
+		hasConfigEnvValue(config, OPENCLAW_OPEN_CODE_FREE_ENV_VAR) ||
+		hasConfigEnvValue(config, OPENCLAW_OPEN_CODE_FREE_ENV_ALIAS)
+	) {
+		return true;
+	}
+
+	const models = config.models;
+	if (!isObject(models)) {
+		return false;
+	}
+	const providers = models.providers;
+	if (!isObject(providers)) {
+		return false;
+	}
+	const openCodeProvider = providers[OPENCLAW_OPEN_CODE_FREE_PROVIDER];
+	if (!isObject(openCodeProvider)) {
+		return false;
+	}
+	return 'apiKey' in openCodeProvider;
+}
+
+function syncOpenCodeFreePublicAuth(
+	config: IDataObject,
+	candidate: OpenClawModelSyncCandidate,
+): OpenClawOpenCodeFreeAuthSyncResult {
+	if (!isOpenCodeFreeModelCandidate(candidate)) {
+		return {
+			changed: false,
+			envVar: OPENCLAW_OPEN_CODE_FREE_ENV_VAR,
+			reason: 'not-open-code-free',
+		};
+	}
+
+	if (hasConfiguredOpenCodeAuth(config)) {
+		return {
+			changed: false,
+			envVar: OPENCLAW_OPEN_CODE_FREE_ENV_VAR,
+			reason: 'existing-auth',
+		};
+	}
+
+	const env = ensureDataObject(config, 'env');
+	const vars = ensureDataObject(env, 'vars');
+	vars[OPENCLAW_OPEN_CODE_FREE_ENV_VAR] = OPENCLAW_OPEN_CODE_FREE_PUBLIC_KEY;
+	return {
+		changed: true,
+		envVar: OPENCLAW_OPEN_CODE_FREE_ENV_VAR,
+		targetPath: `env.vars.${OPENCLAW_OPEN_CODE_FREE_ENV_VAR}`,
+		reason: 'configured-public-env',
+	};
 }
 
 function setModelPrimary(target: IDataObject, key: string, modelId: string): boolean {
@@ -375,8 +465,15 @@ export function syncOpenClawModelConfigCandidates(candidates: OpenClawModelSyncC
 		const { target, targetPath } = getOpenClawAgentConfigTarget(config, candidate.agentId);
 		const existingModel = getModelPrimary(target.model);
 		const candidateChanged = setModelPrimary(target, 'model', candidate.modelId);
-		changed = candidateChanged || changed;
-		results.push({ ...candidate, changed: candidateChanged, existingModel, targetPath });
+		const openCodeFreeAuth = syncOpenCodeFreePublicAuth(config, candidate);
+		changed = candidateChanged || openCodeFreeAuth.changed || changed;
+		results.push({
+			...candidate,
+			changed: candidateChanged,
+			existingModel,
+			targetPath,
+			openCodeFreeAuth,
+		});
 	}
 
 	if (changed) {

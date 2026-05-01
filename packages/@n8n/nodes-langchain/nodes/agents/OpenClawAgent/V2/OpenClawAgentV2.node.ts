@@ -71,6 +71,11 @@ const CLI_SHUTDOWN_GRACE_SECONDS = 90;
 const GATEWAY_RESTART_TIMEOUT_SECONDS = 60;
 const OPENCLAW_CONFIG_PATH_ENV = 'OPENCLAW_CONFIG_PATH';
 const OPENCLAW_DEFAULT_ACCOUNT_ID = 'default';
+const OPEN_CODE_FREE_MODEL_SOURCE = 'opencode-free';
+const OPEN_CODE_FREE_PROVIDER = 'opencode';
+const OPEN_CODE_FREE_ENV_VAR = 'OPENCODE_API_KEY';
+const OPEN_CODE_FREE_ENV_ALIAS = 'OPENCODE_ZEN_API_KEY';
+const OPEN_CODE_FREE_PUBLIC_KEY = 'public';
 
 function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -89,6 +94,61 @@ function normalizeOptionalString(value: unknown): string | undefined {
 	}
 	const trimmed = value.trim();
 	return trimmed || undefined;
+}
+
+function normalizeLowercaseStringOrEmpty(value: string | undefined): string {
+	return (value ?? '').trim().toLowerCase();
+}
+
+function getModelProvider(modelId: string | undefined): string | undefined {
+	const provider = modelId?.split('/')[0];
+	return normalizeOptionalString(provider);
+}
+
+function isOpenCodeFreeModel(
+	modelConfig: ModelConfig | undefined,
+	modelId: string | undefined,
+): boolean {
+	return (
+		modelConfig?.modelSource === OPEN_CODE_FREE_MODEL_SOURCE &&
+		normalizeLowercaseStringOrEmpty(getModelProvider(modelId)) === OPEN_CODE_FREE_PROVIDER
+	);
+}
+
+function hasOpenCodeAuthEnv(env: NodeJS.ProcessEnv): boolean {
+	return (
+		normalizeOptionalString(env[OPEN_CODE_FREE_ENV_VAR]) !== undefined ||
+		normalizeOptionalString(env[OPEN_CODE_FREE_ENV_ALIAS]) !== undefined
+	);
+}
+
+function applyOpenCodeFreeAuthEnv(params: {
+	env: NodeJS.ProcessEnv;
+	modelConfig: ModelConfig | undefined;
+	modelId: string | undefined;
+}): { applied: boolean; envVar: string; reason: string } {
+	if (!isOpenCodeFreeModel(params.modelConfig, params.modelId)) {
+		return {
+			applied: false,
+			envVar: OPEN_CODE_FREE_ENV_VAR,
+			reason: 'not-open-code-free',
+		};
+	}
+
+	if (hasOpenCodeAuthEnv(params.env) || hasOpenCodeAuthEnv(process.env)) {
+		return {
+			applied: false,
+			envVar: OPEN_CODE_FREE_ENV_VAR,
+			reason: 'existing-auth-env',
+		};
+	}
+
+	params.env[OPEN_CODE_FREE_ENV_VAR] = OPEN_CODE_FREE_PUBLIC_KEY;
+	return {
+		applied: true,
+		envVar: OPEN_CODE_FREE_ENV_VAR,
+		reason: 'configured-public-env',
+	};
 }
 
 function getOpenClawConfigPath(): string | undefined {
@@ -789,6 +849,20 @@ export class OpenClawAgentV2 implements INodeType {
 					args.push('--model', resolvedModel);
 					gatewayParams.model = resolvedModel;
 				}
+
+				const openCodeFreeAuth = applyOpenCodeFreeAuthEnv({
+					env: openClawEnv,
+					modelConfig,
+					modelId: resolvedModel,
+				});
+				console.log('[OpenClawAgentV2] OpenCode free auth env resolution', {
+					itemIndex,
+					resolvedModel,
+					modelSource: modelConfig?.modelSource ?? 'text-parameter',
+					applied: openCodeFreeAuth.applied,
+					envVar: openCodeFreeAuth.envVar,
+					reason: openCodeFreeAuth.reason,
+				});
 
 				console.log('[OpenClawAgentV2] model config sync: publish-time sync only', {
 					itemIndex,
