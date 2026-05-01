@@ -10,7 +10,7 @@ export class OpenClawAgent extends VersionedNodeType {
 			displayName: 'OpenClaw AI Agent',
 			name: 'openClawAgent',
 			icon: 'file:openclaw.svg',
-			group: ['transform'],
+			group: ['trigger', 'transform'],
 			description: 'Runs a one-shot OpenClaw agent turn through the OpenClaw CLI',
 			codex: {
 				alias: ['OpenClaw', 'Agent', 'Gateway', 'Assistant', 'Channel'],

@@ -27,10 +27,14 @@ import type { QueryDeepPartialEntity } from '@n8n/typeorm/query-builder/QueryPar
 import isEqual from 'lodash/isEqual';
 import pick from 'lodash/pick';
 import { FileLocation, BinaryDataService } from 'n8n-core';
-import type { INode, INodes, IWorkflowSettings, JsonValue } from 'n8n-workflow';
+import type { IConnections, INode, INodes, IWorkflowSettings, JsonValue } from 'n8n-workflow';
 import { NodeApiError, PROJECT_ROOT, assert, calculateWorkflowChecksum } from 'n8n-workflow';
 import { v4 as uuid } from 'uuid';
 
+import {
+	inspectOpenClawModelSyncCandidates,
+	syncOpenClawModelConfigCandidates,
+} from './openclaw-publish-sync';
 import { WorkflowFinderService } from './workflow-finder.service';
 import { WorkflowHistoryService } from './workflow-history/workflow-history.service';
 import { WorkflowSharingService } from './workflow-sharing.service';
@@ -511,6 +515,87 @@ export class WorkflowService {
 		}
 	}
 
+	private syncOpenClawModelConfigsOnPublish(params: {
+		workflowId: string;
+		versionId: string;
+		nodes: INode[];
+		connections: IConnections;
+	}) {
+		const inspection = inspectOpenClawModelSyncCandidates(params.nodes, params.connections);
+		const { candidates } = inspection;
+		this.logger.info('OpenClaw publish sync: resolved model sync candidates', {
+			workflowId: params.workflowId,
+			versionId: params.versionId,
+			agentNodeCount: inspection.agentNodeCount,
+			modelNodeCount: inspection.modelNodeCount,
+			connectionCount: inspection.connectionCount,
+			modelConnectionCount: inspection.modelConnections.length,
+			candidateCount: candidates.length,
+			agents: inspection.agentDiagnostics,
+			modelConnections: inspection.modelConnections,
+			candidates: candidates.map(({ agentNodeName, agentId, modelId, source, modelNodeName }) => ({
+				agentNodeName,
+				agentId,
+				modelId,
+				source,
+				modelNodeName,
+			})),
+		});
+
+		if (candidates.length === 0) {
+			this.logger.info('OpenClaw publish sync: model config sync completed', {
+				workflowId: params.workflowId,
+				versionId: params.versionId,
+				changed: false,
+				resultCount: 0,
+				skipped: true,
+				reason: 'no-sync-candidates',
+			});
+			return;
+		}
+
+		let syncResult: ReturnType<typeof syncOpenClawModelConfigCandidates>;
+		try {
+			syncResult = syncOpenClawModelConfigCandidates(candidates);
+		} catch (error) {
+			this.logger.error('OpenClaw publish sync: model config sync failed', {
+				workflowId: params.workflowId,
+				versionId: params.versionId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+
+		this.logger.info('OpenClaw publish sync: model config sync completed', {
+			workflowId: params.workflowId,
+			versionId: params.versionId,
+			configPath: syncResult.configPath,
+			changed: syncResult.changed,
+			resultCount: syncResult.results.length,
+			results: syncResult.results.map(
+				({
+					agentNodeName,
+					agentId,
+					modelId,
+					source,
+					modelNodeName,
+					existingModel,
+					targetPath,
+					changed,
+				}) => ({
+					agentNodeName,
+					agentId,
+					modelId,
+					source,
+					modelNodeName,
+					existingModel,
+					targetPath,
+					changed,
+				}),
+			),
+		});
+	}
+
 	/**
 	 * Activates a workflow by setting its activeVersionId and adding it to the active workflow manager.
 	 * @param user - The user activating the workflow
@@ -573,6 +658,12 @@ export class WorkflowService {
 
 		this._validateNodes(workflowId, versionToActivate.nodes);
 		await this._validateSubWorkflowReferences(workflowId, versionToActivate.nodes);
+		this.syncOpenClawModelConfigsOnPublish({
+			workflowId,
+			versionId: versionIdToActivate,
+			nodes: versionToActivate.nodes,
+			connections: versionToActivate.connections,
+		});
 
 		if (wasActive) {
 			await this.activeWorkflowManager.remove(workflowId);

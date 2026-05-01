@@ -14,6 +14,8 @@ import {
 	type INodeType,
 	type INodeTypeBaseDescription,
 	type INodeTypeDescription,
+	type ITriggerFunctions,
+	type ITriggerResponse,
 } from 'n8n-workflow';
 
 interface OpenClawProcessResult {
@@ -687,6 +689,24 @@ export class OpenClawAgentV1 implements INodeType {
 					],
 				},
 			],
+		};
+	}
+
+	async trigger(this: ITriggerFunctions): Promise<ITriggerResponse> {
+		const node = this.getNode();
+		console.log('[OpenClawAgentV1] trigger activation registered', {
+			nodeName: node.name,
+			workflowId: this.getWorkflow().id,
+			activationMode: this.getActivationMode(),
+		});
+
+		return {
+			closeFunction: async () => {
+				console.log('[OpenClawAgentV1] trigger activation closed', {
+					nodeName: node.name,
+					workflowId: this.getWorkflow().id,
+				});
+			},
 		};
 	}
 

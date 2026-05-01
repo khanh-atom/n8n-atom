@@ -14,6 +14,8 @@ import {
 	type INodeType,
 	type INodeTypeBaseDescription,
 	type INodeTypeDescription,
+	type ITriggerFunctions,
+	type ITriggerResponse,
 } from 'n8n-workflow';
 
 export interface ChannelConfig {
@@ -192,48 +194,6 @@ function syncChannelConfig(params: {
 		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 	}
 	return { accountId, changed, configPath };
-}
-
-/**
- * Persists the model selection for a specific OpenClaw agent to openclaw.json.
- * Writes: config.agents.<agentId>.model = modelId
- * This mirrors how syncChannelConfig() persists channel settings.
- */
-function syncModelConfig(params: {
-	agentId: string;
-	modelId: string;
-}): { changed: boolean; configPath: string } {
-	const configPath = getOpenClawConfigPath();
-	if (!configPath) {
-		throw new ApplicationError(
-			`Could not determine OpenClaw config path. Set ${OPENCLAW_CONFIG_PATH_ENV} or HOME for the n8n process.`,
-		);
-	}
-
-	const config = readOpenClawConfig(configPath);
-	const agents = ensureDataObject(config, 'agents');
-	const agentEntry = ensureDataObject(agents, params.agentId);
-
-	let changed = false;
-	changed = setConfigValue(agentEntry, 'model', params.modelId) || changed;
-
-	console.log('[OpenClawAgentV2] syncModelConfig', {
-		agentId: params.agentId,
-		modelId: params.modelId,
-		changed,
-		configPath,
-	});
-
-	if (changed) {
-		mkdirSync(dirname(configPath), { recursive: true });
-		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
-		console.log('[OpenClawAgentV2] openclaw.json updated with model config', {
-			agentId: params.agentId,
-			modelId: params.modelId,
-			configPath,
-		});
-	}
-	return { changed, configPath };
 }
 
 function parseOpenClawOutput(stdout: string): IDataObject {
@@ -556,7 +516,7 @@ export class OpenClawAgentV2 implements INodeType {
 					name: 'model',
 					type: 'string',
 					default: 'openai-codex/gpt-5.5',
-					description: 'Model override for this run.',
+					description: 'Model override for this run',
 				},
 				{
 					displayName: 'Thinking Level',
@@ -603,7 +563,7 @@ export class OpenClawAgentV2 implements INodeType {
 							name: 'systemMessage',
 							type: 'string',
 							default: '',
-							description: 'Additional system instructions for this OpenClaw run.',
+							description: 'Additional system instructions for this OpenClaw run',
 							typeOptions: { rows: 5 },
 						},
 						{
@@ -611,21 +571,21 @@ export class OpenClawAgentV2 implements INodeType {
 							name: 'binaryPath',
 							type: 'string',
 							default: 'openclaw',
-							description: 'Path to the openclaw binary.',
+							description: 'Path to the openclaw binary',
 						},
 						{
 							displayName: 'Working Directory',
 							name: 'workingDirectory',
 							type: 'string',
 							default: '',
-							description: 'Working directory for the OpenClaw process.',
+							description: 'Working directory for the OpenClaw process',
 						},
 						{
 							displayName: 'Timeout',
 							name: 'timeout',
 							type: 'number',
 							default: DEFAULT_TIMEOUT_SECONDS,
-							description: 'OpenClaw agent timeout in seconds.',
+							description: 'OpenClaw agent timeout in seconds',
 							typeOptions: { minValue: 1 },
 						},
 						{
@@ -655,6 +615,24 @@ export class OpenClawAgentV2 implements INodeType {
 		};
 	}
 
+	async trigger(this: ITriggerFunctions): Promise<ITriggerResponse> {
+		const node = this.getNode();
+		console.log('[OpenClawAgentV2] trigger activation registered', {
+			nodeName: node.name,
+			workflowId: this.getWorkflow().id,
+			activationMode: this.getActivationMode(),
+		});
+
+		return {
+			closeFunction: async () => {
+				console.log('[OpenClawAgentV2] trigger activation closed', {
+					nodeName: node.name,
+					workflowId: this.getWorkflow().id,
+				});
+			},
+		};
+	}
+
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
@@ -676,20 +654,58 @@ export class OpenClawAgentV2 implements INodeType {
 		let modelConfig: ModelConfig | undefined;
 		try {
 			const modelData = await this.getInputConnectionData(NodeConnectionTypes.AiLanguageModel, 0);
+			console.log('[OpenClawAgentV2] Raw model data from getInputConnectionData', {
+				type: typeof modelData,
+				isArray: Array.isArray(modelData),
+				isObject: isObject(modelData),
+				constructorName:
+					modelData && typeof modelData === 'object'
+						? (modelData as object).constructor?.name
+						: undefined,
+				keys:
+					modelData && typeof modelData === 'object' && !Array.isArray(modelData)
+						? Object.keys(modelData as object)
+						: undefined,
+				preview: JSON.stringify(modelData)?.substring(0, 300),
+			});
+
+			// Extract the model config — may come as a single object or wrapped in an array
+			let candidate: unknown = modelData;
+			if (Array.isArray(modelData) && modelData.length > 0) {
+				candidate = modelData[0];
+				console.log('[OpenClawAgentV2] Model data was array, using first element', {
+					arrayLength: modelData.length,
+					elementType: typeof candidate,
+				});
+			}
+
 			if (
-				modelData &&
-				isObject(modelData) &&
-				typeof (modelData as Record<string, unknown>).modelId === 'string'
+				candidate &&
+				isObject(candidate) &&
+				typeof (candidate as Record<string, unknown>).modelId === 'string'
 			) {
-				modelConfig = modelData as unknown as ModelConfig;
+				modelConfig = candidate as unknown as ModelConfig;
 				console.log('[OpenClawAgentV2] Model sub-node connected', {
 					modelId: modelConfig.modelId,
 					modelSource: modelConfig.modelSource,
 				});
+			} else if (candidate) {
+				// Data came back but doesn't match ModelConfig shape — log for debugging
+				console.log('[OpenClawAgentV2] Model data received but does not match ModelConfig shape', {
+					candidateType: typeof candidate,
+					isObj: isObject(candidate),
+					hasModelId: isObject(candidate)
+						? typeof (candidate as Record<string, unknown>).modelId
+						: 'n/a',
+					candidateKeys: isObject(candidate) ? Object.keys(candidate as object) : [],
+					candidatePreview: JSON.stringify(candidate)?.substring(0, 300),
+				});
 			}
-		} catch {
+		} catch (err) {
 			// No model connected — that's fine, will use the text parameter
-			console.log('[OpenClawAgentV2] No Model sub-node connected, using text parameter fallback');
+			console.log('[OpenClawAgentV2] No Model sub-node connected, using text parameter fallback', {
+				error: err instanceof Error ? err.message : String(err),
+			});
 		}
 
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
@@ -774,24 +790,12 @@ export class OpenClawAgentV2 implements INodeType {
 					gatewayParams.model = resolvedModel;
 				}
 
-				// Persist model to openclaw.json when a Model sub-node is connected
-				// Only write when selectorType === 'agent' so we have a stable agentId.
-				// Uses the same gateway-restart pattern as channel config sync.
-				if (modelConfig && resolvedModel && selectorType === 'agent') {
-					const agentIdForModel =
-						normalizeOptionalString(
-							this.getNodeParameter(selectorTypeToParameterName.agent, itemIndex),
-						) ?? 'main';
-					console.log('[OpenClawAgentV2] Syncing model to openclaw.json', {
-						agentId: agentIdForModel,
-						modelId: resolvedModel,
-					});
-					const modelSync = syncModelConfig({
-						agentId: agentIdForModel,
-						modelId: resolvedModel,
-					});
-					configChanged = modelSync.changed || configChanged;
-				}
+				console.log('[OpenClawAgentV2] model config sync: publish-time sync only', {
+					itemIndex,
+					hasModelSubNode: !!modelConfig,
+					resolvedModel,
+					selectorType,
+				});
 
 				const thinking = normalizeOptionalString(this.getNodeParameter('thinking', itemIndex));
 				if (thinking) {
