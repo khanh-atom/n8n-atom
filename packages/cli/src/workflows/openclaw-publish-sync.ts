@@ -13,6 +13,9 @@ const OPENCLAW_OPEN_CODE_FREE_PROVIDER = 'opencode';
 const OPENCLAW_OPEN_CODE_FREE_ENV_VAR = 'OPENCODE_API_KEY';
 const OPENCLAW_OPEN_CODE_FREE_ENV_ALIAS = 'OPENCODE_ZEN_API_KEY';
 const OPENCLAW_OPEN_CODE_FREE_PUBLIC_KEY = 'public';
+const OPENCLAW_STATE_DIR_ENV = 'OPENCLAW_STATE_DIR';
+const OPENCLAW_MAIN_SESSION_KEY_SEGMENT = 'main';
+const OPENCLAW_SESSION_STORE_FILE = 'sessions.json';
 
 export type OpenClawModelSyncCandidate = {
 	agentNodeName: string;
@@ -59,6 +62,7 @@ export type OpenClawModelSyncResult = OpenClawModelSyncCandidate & {
 	existingModel?: string;
 	targetPath: string;
 	openCodeFreeAuth?: OpenClawOpenCodeFreeAuthSyncResult;
+	sessionModel?: OpenClawSessionModelSyncResult;
 };
 
 export type OpenClawOpenCodeFreeAuthSyncResult = {
@@ -66,6 +70,26 @@ export type OpenClawOpenCodeFreeAuthSyncResult = {
 	envVar: string;
 	targetPath?: string;
 	reason: 'configured-public-env' | 'existing-auth' | 'not-open-code-free';
+};
+
+export type OpenClawSessionModelSyncResult = {
+	changed: boolean;
+	sessionKey: string;
+	storePath: string;
+	provider?: string;
+	model?: string;
+	existingProvider?: string;
+	existingModel?: string;
+	existingProviderOverride?: string;
+	existingModelOverride?: string;
+	targetPath?: string;
+	reason:
+		| 'updated-session-model'
+		| 'already-current'
+		| 'missing-session-store'
+		| 'missing-session-entry'
+		| 'invalid-session-entry'
+		| 'invalid-model-id';
 };
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -112,6 +136,24 @@ function getOpenClawConfigPath(): string | undefined {
 	return home ? join(home, '.openclaw', 'openclaw.json') : undefined;
 }
 
+function getOpenClawStateDir(configPath: string): string {
+	return normalizeOptionalString(process.env[OPENCLAW_STATE_DIR_ENV]) ?? dirname(configPath);
+}
+
+function getOpenClawSessionStorePath(configPath: string, agentId: string): string {
+	return join(
+		getOpenClawStateDir(configPath),
+		'agents',
+		normalizeOpenClawAgentId(agentId),
+		'sessions',
+		OPENCLAW_SESSION_STORE_FILE,
+	);
+}
+
+function getOpenClawMainSessionKey(agentId: string): string {
+	return `agent:${normalizeOpenClawAgentId(agentId)}:${OPENCLAW_MAIN_SESSION_KEY_SEGMENT}`;
+}
+
 function readOpenClawConfig(configPath: string): IDataObject {
 	if (!existsSync(configPath)) {
 		return {};
@@ -123,6 +165,18 @@ function readOpenClawConfig(configPath: string): IDataObject {
 	const parsed = jsonParse<unknown>(rawConfig, { acceptJSObject: true, repairJSON: true });
 	if (!isObject(parsed)) {
 		throw new UnexpectedError(`OpenClaw config is not an object: ${configPath}`);
+	}
+	return parsed as IDataObject;
+}
+
+function readOpenClawSessionStore(storePath: string): IDataObject {
+	const rawStore = readFileSync(storePath, 'utf8').trim();
+	if (!rawStore) {
+		return {};
+	}
+	const parsed = jsonParse<unknown>(rawStore, { acceptJSObject: true, repairJSON: true });
+	if (!isObject(parsed)) {
+		throw new UnexpectedError(`OpenClaw sessions store is not an object: ${storePath}`);
 	}
 	return parsed as IDataObject;
 }
@@ -149,6 +203,16 @@ function getModelPrimary(value: unknown): string | undefined {
 
 function getModelProvider(value: string): string | undefined {
 	return normalizeOptionalString(value.split('/')[0]);
+}
+
+function parseModelRef(modelId: string): { provider: string; model: string } | undefined {
+	const [providerPart, ...modelParts] = modelId.split('/');
+	const provider = normalizeOptionalString(providerPart)?.toLowerCase();
+	const model = normalizeOptionalString(modelParts.join('/'));
+	if (!provider || !model) {
+		return undefined;
+	}
+	return { provider, model };
 }
 
 function isOpenCodeFreeModelCandidate(candidate: OpenClawModelSyncCandidate): boolean {
@@ -222,6 +286,136 @@ function syncOpenCodeFreePublicAuth(
 		envVar: OPENCLAW_OPEN_CODE_FREE_ENV_VAR,
 		targetPath: `env.vars.${OPENCLAW_OPEN_CODE_FREE_ENV_VAR}`,
 		reason: 'configured-public-env',
+	};
+}
+
+function applySessionModelOverride(
+	entry: Record<string, unknown>,
+	modelRef: { provider: string; model: string },
+): boolean {
+	let changed = false;
+	let selectionUpdated = false;
+
+	if (entry.providerOverride !== modelRef.provider) {
+		entry.providerOverride = modelRef.provider;
+		changed = true;
+		selectionUpdated = true;
+	}
+	if (entry.modelOverride !== modelRef.model) {
+		entry.modelOverride = modelRef.model;
+		changed = true;
+		selectionUpdated = true;
+	}
+	if (entry.modelOverrideSource !== 'auto') {
+		entry.modelOverrideSource = 'auto';
+		changed = true;
+	}
+
+	const runtimeProvider = normalizeOptionalString(entry.modelProvider);
+	const runtimeModel = normalizeOptionalString(entry.model);
+	const runtimePresent = runtimeProvider !== undefined || runtimeModel !== undefined;
+	const runtimeAligned = runtimeProvider === modelRef.provider && runtimeModel === modelRef.model;
+	if (runtimePresent && (selectionUpdated || !runtimeAligned)) {
+		if (entry.modelProvider !== undefined) {
+			delete entry.modelProvider;
+			changed = true;
+		}
+		if (entry.model !== undefined) {
+			delete entry.model;
+			changed = true;
+		}
+	}
+
+	if (
+		entry.contextTokens !== undefined &&
+		(selectionUpdated || (runtimePresent && !runtimeAligned))
+	) {
+		delete entry.contextTokens;
+		changed = true;
+	}
+
+	if (changed) {
+		delete entry.fallbackNoticeSelectedModel;
+		delete entry.fallbackNoticeActiveModel;
+		delete entry.fallbackNoticeReason;
+		entry.updatedAt = Date.now();
+	}
+
+	return changed;
+}
+
+function syncOpenClawSessionModel(
+	configPath: string,
+	candidate: OpenClawModelSyncCandidate,
+): OpenClawSessionModelSyncResult {
+	const sessionKey = getOpenClawMainSessionKey(candidate.agentId);
+	const storePath = getOpenClawSessionStorePath(configPath, candidate.agentId);
+	const modelRef = parseModelRef(candidate.modelId);
+	if (!modelRef) {
+		return {
+			changed: false,
+			sessionKey,
+			storePath,
+			reason: 'invalid-model-id',
+		};
+	}
+
+	if (!existsSync(storePath)) {
+		return {
+			changed: false,
+			sessionKey,
+			storePath,
+			provider: modelRef.provider,
+			model: modelRef.model,
+			reason: 'missing-session-store',
+		};
+	}
+
+	const store = readOpenClawSessionStore(storePath);
+	const entry = store[sessionKey];
+	if (entry === undefined) {
+		return {
+			changed: false,
+			sessionKey,
+			storePath,
+			provider: modelRef.provider,
+			model: modelRef.model,
+			reason: 'missing-session-entry',
+		};
+	}
+	if (!isObject(entry)) {
+		return {
+			changed: false,
+			sessionKey,
+			storePath,
+			provider: modelRef.provider,
+			model: modelRef.model,
+			reason: 'invalid-session-entry',
+		};
+	}
+
+	const existingProvider = normalizeOptionalString(entry.modelProvider);
+	const existingModel = normalizeOptionalString(entry.model);
+	const existingProviderOverride = normalizeOptionalString(entry.providerOverride);
+	const existingModelOverride = normalizeOptionalString(entry.modelOverride);
+	const changed = applySessionModelOverride(entry, modelRef);
+	if (changed) {
+		mkdirSync(dirname(storePath), { recursive: true });
+		writeFileSync(storePath, `${JSON.stringify(store, null, 2)}\n`, 'utf8');
+	}
+
+	return {
+		changed,
+		sessionKey,
+		storePath,
+		provider: modelRef.provider,
+		model: modelRef.model,
+		existingProvider,
+		existingModel,
+		existingProviderOverride,
+		existingModelOverride,
+		targetPath: `${sessionKey}.providerOverride/modelOverride`,
+		reason: changed ? 'updated-session-model' : 'already-current',
 	};
 }
 
@@ -459,6 +653,7 @@ export function syncOpenClawModelConfigCandidates(candidates: OpenClawModelSyncC
 
 	const config = readOpenClawConfig(configPath);
 	const results: OpenClawModelSyncResult[] = [];
+	let configChanged = false;
 	let changed = false;
 
 	for (const candidate of candidates) {
@@ -466,17 +661,20 @@ export function syncOpenClawModelConfigCandidates(candidates: OpenClawModelSyncC
 		const existingModel = getModelPrimary(target.model);
 		const candidateChanged = setModelPrimary(target, 'model', candidate.modelId);
 		const openCodeFreeAuth = syncOpenCodeFreePublicAuth(config, candidate);
-		changed = candidateChanged || openCodeFreeAuth.changed || changed;
+		const sessionModel = syncOpenClawSessionModel(configPath, candidate);
+		configChanged = candidateChanged || openCodeFreeAuth.changed || configChanged;
+		changed = candidateChanged || openCodeFreeAuth.changed || sessionModel.changed || changed;
 		results.push({
 			...candidate,
 			changed: candidateChanged,
 			existingModel,
 			targetPath,
 			openCodeFreeAuth,
+			sessionModel,
 		});
 	}
 
-	if (changed) {
+	if (configChanged) {
 		mkdirSync(dirname(configPath), { recursive: true });
 		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 	}

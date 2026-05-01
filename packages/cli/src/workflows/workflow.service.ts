@@ -583,6 +583,7 @@ export class WorkflowService {
 					targetPath,
 					changed,
 					openCodeFreeAuth,
+					sessionModel,
 				}) => ({
 					agentNodeName,
 					agentId,
@@ -593,6 +594,7 @@ export class WorkflowService {
 					targetPath,
 					changed,
 					openCodeFreeAuth,
+					sessionModel,
 				}),
 			),
 		});
