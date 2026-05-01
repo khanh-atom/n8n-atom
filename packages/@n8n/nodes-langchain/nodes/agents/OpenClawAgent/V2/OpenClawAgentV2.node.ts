@@ -27,6 +27,16 @@ export interface ChannelConfig {
 	extra?: IDataObject;
 }
 
+/**
+ * Configuration returned by Model sub-nodes connected to the OpenClaw agent.
+ * The modelId is used to override the --model CLI flag.
+ */
+export interface ModelConfig {
+	modelId: string;
+	modelSource: string;
+	extra?: IDataObject;
+}
+
 interface OpenClawProcessResult {
 	stdout: string;
 	stderr: string;
@@ -419,6 +429,11 @@ export class OpenClawAgentV2 implements INodeType {
 					type: NodeConnectionTypes.AiChannel,
 					displayName: 'Channel',
 				},
+				{
+					type: NodeConnectionTypes.AiLanguageModel,
+					displayName: 'Model',
+					required: false,
+				},
 			],
 			outputs: [NodeConnectionTypes.Main],
 			// No hardcoded credentials — channels provide their own
@@ -615,6 +630,26 @@ export class OpenClawAgentV2 implements INodeType {
 			// No channels connected — that's fine
 		}
 
+		// Retrieve model config from connected Model sub-node
+		let modelConfig: ModelConfig | undefined;
+		try {
+			const modelData = await this.getInputConnectionData(NodeConnectionTypes.AiLanguageModel, 0);
+			if (
+				modelData &&
+				isObject(modelData) &&
+				typeof (modelData as Record<string, unknown>).modelId === 'string'
+			) {
+				modelConfig = modelData as unknown as ModelConfig;
+				console.log('[OpenClawAgentV2] Model sub-node connected', {
+					modelId: modelConfig.modelId,
+					modelSource: modelConfig.modelSource,
+				});
+			}
+		} catch {
+			// No model connected — that's fine, will use the text parameter
+			console.log('[OpenClawAgentV2] No Model sub-node connected, using text parameter fallback');
+		}
+
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
 			try {
 				const message = normalizeOptionalString(this.getNodeParameter('message', itemIndex));
@@ -682,10 +717,19 @@ export class OpenClawAgentV2 implements INodeType {
 					}
 				}
 
-				const model = normalizeOptionalString(this.getNodeParameter('model', itemIndex));
-				if (model) {
-					args.push('--model', model);
-					gatewayParams.model = model;
+				// Resolve model: connected Model sub-node takes precedence over text parameter
+				const paramModel = normalizeOptionalString(this.getNodeParameter('model', itemIndex));
+				const resolvedModel = modelConfig?.modelId ?? paramModel;
+				console.log('[OpenClawAgentV2] Model resolution', {
+					itemIndex,
+					paramModel,
+					connectedModel: modelConfig?.modelId,
+					resolvedModel,
+					modelSource: modelConfig?.modelSource ?? 'text-parameter',
+				});
+				if (resolvedModel) {
+					args.push('--model', resolvedModel);
+					gatewayParams.model = resolvedModel;
 				}
 
 				const thinking = normalizeOptionalString(this.getNodeParameter('thinking', itemIndex));
