@@ -454,7 +454,7 @@ function syncNineRouterModelConfig(params: {
 }
 
 function syncPluginConfig(params: {
-	pluginPaths: string[];
+	pluginConfigs: PluginConfig[];
 }): { changed: boolean; configPath: string } {
 	const configPath = getOpenClawConfigPath();
 	if (!configPath) {
@@ -464,36 +464,61 @@ function syncPluginConfig(params: {
 	}
 	const config = readOpenClawConfig(configPath);
 	const plugins = ensureDataObject(config, 'plugins');
+	const entries = ensureDataObject(plugins, 'entries');
 
 	let changed = false;
 
-	// Ensure paths array exists
-	let existingPaths: string[];
-	if (Array.isArray(plugins.paths)) {
-		existingPaths = plugins.paths.filter((p): p is string => typeof p === 'string');
-	} else {
-		existingPaths = [];
-	}
+	for (const pluginCfg of params.pluginConfigs) {
+		if (pluginCfg.pluginSource === 'local') {
+			// For local plugins with a manifest ID, enable them under plugins.entries.<id>
+			const manifestId = pluginCfg.pluginManifest?.id;
+			if (manifestId) {
+				const entry = ensureDataObject(entries, manifestId);
+				changed = setConfigValue(entry, 'enabled', true) || changed;
+				console.log('[OpenClawAgentV2] syncPluginConfig: enabling local plugin entry', {
+					manifestId,
+					path: pluginCfg.pluginPath,
+				});
+			}
 
-	// Merge new paths, avoiding duplicates
-	const mergedPaths = [...existingPaths];
-	for (const pluginPath of params.pluginPaths) {
-		if (!mergedPaths.includes(pluginPath)) {
-			mergedPaths.push(pluginPath);
-			changed = true;
+			// Track the plugin directory so openclaw knows where to scan
+			if (pluginCfg.pluginPath) {
+				let pluginDirs: string[];
+				if (Array.isArray(plugins.pluginDirs)) {
+					pluginDirs = (plugins.pluginDirs as unknown[]).filter(
+						(p): p is string => typeof p === 'string',
+					);
+				} else {
+					pluginDirs = [];
+				}
+				if (!pluginDirs.includes(pluginCfg.pluginPath)) {
+					pluginDirs.push(pluginCfg.pluginPath);
+					plugins.pluginDirs = pluginDirs as unknown as IDataObject[string];
+					changed = true;
+					console.log('[OpenClawAgentV2] syncPluginConfig: added pluginDir', {
+						pluginPath: pluginCfg.pluginPath,
+						totalDirs: pluginDirs.length,
+					});
+				}
+			}
+		} else if (pluginCfg.pluginSource === 'cloud' && pluginCfg.pluginId) {
+			// For cloud plugins, enable them under plugins.entries.<id>
+			const entry = ensureDataObject(entries, pluginCfg.pluginId);
+			changed = setConfigValue(entry, 'enabled', true) || changed;
+			console.log('[OpenClawAgentV2] syncPluginConfig: enabling cloud plugin entry', {
+				pluginId: pluginCfg.pluginId,
+				pluginVersion: pluginCfg.pluginVersion,
+			});
 		}
 	}
 
 	if (changed) {
-		plugins.paths = mergedPaths as unknown as IDataObject[string];
 		mkdirSync(dirname(configPath), { recursive: true });
 		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 	}
 
 	console.log('[OpenClawAgentV2] syncPluginConfig: result', {
-		existingPathCount: existingPaths.length,
-		newPathCount: params.pluginPaths.length,
-		mergedPathCount: mergedPaths.length,
+		pluginCount: params.pluginConfigs.length,
 		changed,
 		configPath,
 	});
@@ -921,17 +946,28 @@ export class OpenClawAgentV2 implements INodeType {
 
 	async trigger(this: ITriggerFunctions): Promise<ITriggerResponse> {
 		const node = this.getNode();
+		const workflowId = this.getWorkflow().id;
+		const activationMode = this.getActivationMode();
 		console.log('[OpenClawAgentV2] trigger activation registered', {
 			nodeName: node.name,
-			workflowId: this.getWorkflow().id,
-			activationMode: this.getActivationMode(),
+			workflowId,
+			activationMode,
+		});
+		console.log('OpenClaw publish sync: trigger activated', {
+			workflowId,
+			activationMode,
+			nodeName: node.name,
 		});
 
 		return {
 			closeFunction: async () => {
 				console.log('[OpenClawAgentV2] trigger activation closed', {
 					nodeName: node.name,
-					workflowId: this.getWorkflow().id,
+					workflowId,
+				});
+				console.log('OpenClaw publish sync: trigger deactivated', {
+					workflowId,
+					nodeName: node.name,
 				});
 			},
 		};
@@ -940,6 +976,11 @@ export class OpenClawAgentV2 implements INodeType {
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
+		console.log('OpenClaw publish sync: execute started', {
+			itemCount: items.length,
+			nodeName: this.getNode().name,
+			workflowId: this.getWorkflow().id,
+		});
 
 		// Retrieve channel configs from connected sub-nodes
 		let channelConfigs: ChannelConfig[] = [];
@@ -950,8 +991,13 @@ export class OpenClawAgentV2 implements INodeType {
 			} else if (channelData && isObject(channelData)) {
 				channelConfigs = [channelData as unknown as ChannelConfig];
 			}
+			console.log('OpenClaw publish sync: resolved channel candidates', {
+				channelCount: channelConfigs.length,
+				channelTypes: channelConfigs.map((c) => c.channelType),
+			});
 		} catch {
 			// No channels connected — that's fine
+			console.log('OpenClaw publish sync: no channels connected');
 		}
 
 		// Retrieve model config from connected Model sub-node
@@ -1014,6 +1060,11 @@ export class OpenClawAgentV2 implements INodeType {
 				error: err instanceof Error ? err.message : String(err),
 			});
 		}
+		console.log('OpenClaw publish sync: resolved model sync candidates', {
+			hasModelSubNode: !!modelConfig,
+			modelId: modelConfig?.modelId,
+			modelSource: modelConfig?.modelSource ?? 'none',
+		});
 
 		// Retrieve plugin configs from connected Plugin sub-nodes
 		let pluginConfigs: PluginConfig[] = [];
@@ -1054,6 +1105,15 @@ export class OpenClawAgentV2 implements INodeType {
 			// No plugins connected — that's fine
 			console.log('[OpenClawAgentV2] No Plugin sub-nodes connected (no AiTool input)');
 		}
+		console.log('OpenClaw publish sync: resolved plugin sync candidates', {
+			pluginCount: pluginConfigs.length,
+			localCount: pluginConfigs.filter((p) => p.pluginSource === 'local').length,
+			cloudCount: pluginConfigs.filter((p) => p.pluginSource === 'cloud').length,
+			manifestIds: pluginConfigs
+				.filter((p) => p.pluginManifest?.id)
+				.map((p) => p.pluginManifest?.id),
+			cloudIds: pluginConfigs.filter((p) => p.pluginId).map((p) => p.pluginId),
+		});
 
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
 			try {
@@ -1097,23 +1157,28 @@ export class OpenClawAgentV2 implements INodeType {
 							})),
 					});
 
-					// Sync local plugin paths to openclaw.json
-					if (pluginPaths.length > 0) {
-						try {
-							const pluginSync = syncPluginConfig({ pluginPaths });
-							console.log('[OpenClawAgentV2] Plugin config sync result', {
-								itemIndex,
-								changed: pluginSync.changed,
-								configPath: pluginSync.configPath,
-							});
-						} catch (syncError) {
-							console.log('[OpenClawAgentV2] Plugin config sync failed (non-fatal)', {
-								itemIndex,
-								error: getErrorMessage(syncError),
-							});
-						}
+					// Sync all plugin configs to openclaw.json (entries + pluginDirs)
+					try {
+						const pluginSync = syncPluginConfig({ pluginConfigs });
+						console.log('[OpenClawAgentV2] Plugin config sync result', {
+							itemIndex,
+							changed: pluginSync.changed,
+							configPath: pluginSync.configPath,
+						});
+					} catch (syncError) {
+						console.log('[OpenClawAgentV2] Plugin config sync failed (non-fatal)', {
+							itemIndex,
+							error: getErrorMessage(syncError),
+						});
+					}
+					console.log('OpenClaw publish sync: plugin config sync completed', {
+						itemIndex,
+						localPaths: pluginPaths,
+						cloudSpecs,
+					});
 
-						// Pass local plugin paths via environment variable for the CLI
+					// Pass local plugin paths via environment variable for the CLI
+					if (pluginPaths.length > 0) {
 						openClawEnv.OPENCLAW_PLUGIN_PATHS = pluginPaths.join(';');
 						console.log('[OpenClawAgentV2] Set OPENCLAW_PLUGIN_PATHS env var', {
 							itemIndex,
@@ -1157,6 +1222,12 @@ export class OpenClawAgentV2 implements INodeType {
 						replyAccount: whatsappChannel.accountId,
 					});
 				}
+				console.log('OpenClaw publish sync: channel config sync completed', {
+					itemIndex,
+					hasTelegram: !!telegramChannel,
+					hasWhatsApp: !!whatsappChannel,
+					channelCount: channelConfigs.length,
+				});
 
 				let args = ['agent', '--message', message, '--json'];
 				let processTimeoutMs: number | undefined;
@@ -1230,6 +1301,13 @@ export class OpenClawAgentV2 implements INodeType {
 					configPath: nineRouterConfigSync.configPath,
 					existingBaseUrl: nineRouterConfigSync.existingBaseUrl,
 					restart: 'publish-only',
+				});
+				console.log('OpenClaw publish sync: model config sync completed', {
+					itemIndex,
+					resolvedModel,
+					modelSource: modelConfig?.modelSource ?? 'text-parameter',
+					syncChanged: nineRouterConfigSync.changed,
+					syncReason: nineRouterConfigSync.reason,
 				});
 
 				const thinking = normalizeOptionalString(this.getNodeParameter('thinking', itemIndex));
@@ -1307,6 +1385,17 @@ export class OpenClawAgentV2 implements INodeType {
 					processTimeoutMs = rpcTimeoutMs + 10_000;
 				}
 
+				console.log('OpenClaw publish sync: launching CLI', {
+					itemIndex,
+					binaryPath,
+					argCount: args.length,
+					cwd: workingDirectory ?? '(default)',
+					envKeys: Object.keys(openClawEnv),
+					resolvedModel,
+					pluginCount: pluginConfigs.length,
+					channelCount: channelConfigs.length,
+				});
+
 				const result = await runOpenClawCli({
 					binaryPath,
 					args,
@@ -1314,6 +1403,14 @@ export class OpenClawAgentV2 implements INodeType {
 					timeoutMs: processTimeoutMs ?? getWatchdogTimeoutMs(timeoutSeconds),
 					env: openClawEnv,
 					abortSignal: this.getExecutionCancelSignal(),
+				});
+
+				console.log('OpenClaw publish sync: CLI execution completed', {
+					itemIndex,
+					exitCode: result.exitCode,
+					signal: result.signal,
+					stdoutLength: result.stdout.length,
+					stderrLength: result.stderr.length,
 				});
 
 				if (result.exitCode !== 0) {
