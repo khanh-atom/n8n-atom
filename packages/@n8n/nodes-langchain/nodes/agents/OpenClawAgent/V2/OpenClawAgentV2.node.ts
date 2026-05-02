@@ -76,6 +76,12 @@ const OPEN_CODE_FREE_PROVIDER = 'opencode';
 const OPEN_CODE_FREE_ENV_VAR = 'OPENCODE_API_KEY';
 const OPEN_CODE_FREE_ENV_ALIAS = 'OPENCODE_ZEN_API_KEY';
 const OPEN_CODE_FREE_PUBLIC_KEY = 'public';
+const NINE_ROUTER_MODEL_SOURCE = '9router';
+const NINE_ROUTER_PROVIDER = '9router';
+const NINE_ROUTER_DEFAULT_BASE_URL = 'http://localhost:20128/api/v1';
+const NINE_ROUTER_API = 'openai-completions';
+const NINE_ROUTER_CONTEXT_WINDOW = 128_000;
+const NINE_ROUTER_MAX_TOKENS = 32_000;
 
 function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -139,6 +145,16 @@ function getModelDataPreview(value: unknown): string | undefined {
 function getModelProvider(modelId: string | undefined): string | undefined {
 	const provider = modelId?.split('/')[0];
 	return normalizeOptionalString(provider);
+}
+
+function parseModelRef(modelId: string): { provider: string; model: string } | undefined {
+	const [providerPart, ...modelParts] = modelId.split('/');
+	const provider = normalizeOptionalString(providerPart)?.toLowerCase();
+	const model = normalizeOptionalString(modelParts.join('/'));
+	if (!provider || !model) {
+		return undefined;
+	}
+	return { provider, model };
 }
 
 function isOpenCodeFreeModel(
@@ -290,6 +306,126 @@ function syncChannelConfig(params: {
 		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 	}
 	return { accountId, changed, configPath };
+}
+
+function getNineRouterModelDefinition(model: string): IDataObject {
+	return {
+		id: model,
+		name: model === 'auto' ? '9Router Auto' : model,
+		api: NINE_ROUTER_API,
+		reasoning: false,
+		input: ['text', 'image'],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: NINE_ROUTER_CONTEXT_WINDOW,
+		maxTokens: NINE_ROUTER_MAX_TOKENS,
+	};
+}
+
+function syncNineRouterModelConfig(params: {
+	modelConfig: ModelConfig | undefined;
+	modelId: string | undefined;
+}): {
+	changed: boolean;
+	configPath?: string;
+	reason: string;
+	targetPath?: string;
+	modelRef?: string;
+	existingBaseUrl?: string;
+} {
+	if (
+		params.modelConfig?.modelSource !== NINE_ROUTER_MODEL_SOURCE ||
+		normalizeLowercaseStringOrEmpty(getModelProvider(params.modelId)) !== NINE_ROUTER_PROVIDER ||
+		!params.modelId
+	) {
+		return { changed: false, reason: 'not-nine-router' };
+	}
+
+	const modelRef = parseModelRef(params.modelId);
+	if (!modelRef || modelRef.provider !== NINE_ROUTER_PROVIDER) {
+		return { changed: false, reason: 'invalid-model-id' };
+	}
+
+	const configPath = getOpenClawConfigPath();
+	if (!configPath) {
+		throw new ApplicationError(
+			`Could not determine OpenClaw config path. Set ${OPENCLAW_CONFIG_PATH_ENV} or HOME for the n8n process.`,
+		);
+	}
+
+	const config = readOpenClawConfig(configPath);
+	const models = ensureDataObject(config, 'models');
+	const providers = ensureDataObject(models, 'providers');
+	const provider = ensureDataObject(providers, NINE_ROUTER_PROVIDER);
+	const existingBaseUrl = normalizeOptionalString(provider.baseUrl);
+
+	let changed = false;
+	changed =
+		setDefaultConfigValue(
+			provider,
+			'baseUrl',
+			normalizeOptionalString(params.modelConfig.extra?.baseUrl) ?? NINE_ROUTER_DEFAULT_BASE_URL,
+		) || changed;
+	changed = setConfigValue(provider, 'api', NINE_ROUTER_API) || changed;
+
+	let providerModels: IDataObject[];
+	if (Array.isArray(provider.models)) {
+		providerModels = provider.models.filter(isObject) as IDataObject[];
+		if (providerModels.length !== provider.models.length) {
+			provider.models = providerModels;
+			changed = true;
+		}
+	} else {
+		providerModels = [];
+		provider.models = providerModels;
+		changed = true;
+	}
+
+	const existingModel = providerModels.find(
+		(model) => normalizeOptionalString(model.id) === modelRef.model,
+	);
+	if (existingModel) {
+		changed = setConfigValue(existingModel, 'api', NINE_ROUTER_API) || changed;
+		changed = setDefaultConfigValue(existingModel, 'name', modelRef.model) || changed;
+		changed = setDefaultConfigValue(existingModel, 'reasoning', false) || changed;
+		changed = setDefaultConfigValue(existingModel, 'input', ['text', 'image']) || changed;
+		changed =
+			setDefaultConfigValue(existingModel, 'cost', {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+			}) || changed;
+		changed =
+			setDefaultConfigValue(existingModel, 'contextWindow', NINE_ROUTER_CONTEXT_WINDOW) || changed;
+		changed = setDefaultConfigValue(existingModel, 'maxTokens', NINE_ROUTER_MAX_TOKENS) || changed;
+	} else {
+		providerModels.push(getNineRouterModelDefinition(modelRef.model));
+		changed = true;
+	}
+
+	const agents = ensureDataObject(config, 'agents');
+	const defaults = ensureDataObject(agents, 'defaults');
+	const defaultModels = ensureDataObject(defaults, 'models');
+	const fullModelRef = `${modelRef.provider}/${modelRef.model}`;
+	const existingDefaultModel = defaultModels[fullModelRef];
+	if (!isObject(existingDefaultModel)) {
+		defaultModels[fullModelRef] = {};
+		changed = true;
+	}
+
+	if (changed) {
+		mkdirSync(dirname(configPath), { recursive: true });
+		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+	}
+
+	return {
+		changed,
+		configPath,
+		reason: changed ? 'updated-provider' : 'already-current',
+		targetPath: `models.providers.${NINE_ROUTER_PROVIDER}`,
+		modelRef: fullModelRef,
+		existingBaseUrl,
+	};
 }
 
 function parseOpenClawOutput(stdout: string): IDataObject {
@@ -895,11 +1031,23 @@ export class OpenClawAgentV2 implements INodeType {
 					reason: openCodeFreeAuth.reason,
 				});
 
-				console.log('[OpenClawAgentV2] model config sync: publish-time sync only', {
+				const nineRouterConfigSync = syncNineRouterModelConfig({
+					modelConfig,
+					modelId: resolvedModel,
+				});
+				configChanged = nineRouterConfigSync.changed || configChanged;
+				console.log('[OpenClawAgentV2] 9Router model config sync', {
 					itemIndex,
 					hasModelSubNode: !!modelConfig,
 					resolvedModel,
+					modelSource: modelConfig?.modelSource ?? 'text-parameter',
 					selectorType,
+					changed: nineRouterConfigSync.changed,
+					reason: nineRouterConfigSync.reason,
+					targetPath: nineRouterConfigSync.targetPath,
+					modelRef: nineRouterConfigSync.modelRef,
+					configPath: nineRouterConfigSync.configPath,
+					existingBaseUrl: nineRouterConfigSync.existingBaseUrl,
 				});
 
 				const thinking = normalizeOptionalString(this.getNodeParameter('thinking', itemIndex));

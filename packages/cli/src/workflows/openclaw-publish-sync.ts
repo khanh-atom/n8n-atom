@@ -91,6 +91,7 @@ export type OpenClawNineRouterProviderSyncResult = {
 	targetPath?: string;
 	existingBaseUrl?: string;
 	existingApi?: string;
+	allowedModelTargetPath?: string;
 	reason: 'updated-provider' | 'already-current' | 'not-nine-router' | 'invalid-model-id';
 };
 
@@ -437,6 +438,15 @@ function syncNineRouterProviderConfig(
 		changed = true;
 	}
 
+	const agents = ensureDataObject(config, 'agents');
+	const defaults = ensureDataObject(agents, 'defaults');
+	const defaultModels = ensureDataObject(defaults, 'models');
+	const fullModelRef = `${modelRef.provider}/${modelRef.model}`;
+	if (!isObject(defaultModels[fullModelRef])) {
+		defaultModels[fullModelRef] = {};
+		changed = true;
+	}
+
 	return {
 		changed,
 		provider: OPENCLAW_NINE_ROUTER_PROVIDER,
@@ -446,6 +456,7 @@ function syncNineRouterProviderConfig(
 		targetPath: `models.providers.${OPENCLAW_NINE_ROUTER_PROVIDER}`,
 		existingBaseUrl,
 		existingApi,
+		allowedModelTargetPath: `agents.defaults.models.${fullModelRef}`,
 		reason: changed ? 'updated-provider' : 'already-current',
 	};
 }
