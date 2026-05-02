@@ -1017,154 +1017,160 @@ export class OpenClawAgentV2 implements INodeType {
 		// ── Publish-time config sync ──
 		// On activation (publish), discover connected sub-nodes and sync
 		// their configs to openclaw.json so the CLI has up-to-date settings.
-		try {
-			const nodeName = node.name;
+		if (activationMode !== 'init') {
+			try {
+				const nodeName = node.name;
 
-			// Find plugin sub-nodes connected via AiTool
-			const pluginParents = this.getParentNodes(nodeName, {
-				includeNodeParameters: true,
-				connectionType: NodeConnectionTypes.AiTool,
-				depth: 1,
-			});
-			console.log('OpenClaw publish sync: discovered plugin sub-nodes', {
-				count: pluginParents.length,
-				nodes: pluginParents.map((p) => ({
-					name: (p as unknown as { name?: string }).name,
-					type: p.type,
-					params: p.parameters ? Object.keys(p.parameters) : [],
-				})),
-			});
-
-			// Build PluginConfig objects from discovered plugin sub-node parameters
-			const publishPluginConfigs: PluginConfig[] = [];
-			for (const pluginNode of pluginParents) {
-				const params = pluginNode.parameters ?? {};
-				const pluginSource = (params.pluginSource as string) || 'local';
-
-				console.log('OpenClaw publish sync: processing plugin sub-node', {
-					type: pluginNode.type,
-					pluginSource,
-					params: JSON.stringify(params).slice(0, 300),
+				// Find plugin sub-nodes connected via AiTool
+				const pluginParents = this.getParentNodes(nodeName, {
+					includeNodeParameters: true,
+					connectionType: NodeConnectionTypes.AiTool,
+					depth: 1,
+				});
+				console.log('OpenClaw publish sync: discovered plugin sub-nodes', {
+					count: pluginParents.length,
+					nodes: pluginParents.map((p) => ({
+						name: (p as unknown as { name?: string }).name,
+						type: p.type,
+						params: p.parameters ? Object.keys(p.parameters) : [],
+					})),
 				});
 
-				if (pluginSource === 'local') {
-					// Read pluginDirectory — may be an expression like ={{ $workspace.__dirPath }}
-					let pluginDirectory = (params.pluginDirectory as string) || '';
+				// Build PluginConfig objects from discovered plugin sub-node parameters
+				const publishPluginConfigs: PluginConfig[] = [];
+				for (const pluginNode of pluginParents) {
+					const params = pluginNode.parameters ?? {};
+					const pluginSource = (params.pluginSource as string) || 'local';
 
-					// If it's an expression referencing $workspace.__dirPath, resolve it manually
-					// from the workflow's workspace context (available at trigger/activation time)
-					if (
-						pluginDirectory.includes('$workspace.__dirPath') ||
-						pluginDirectory.includes('$workspace[')
-					) {
-						// Access the workflow's workspace context directly
-						// The underlying Workflow object is available through the TriggerContext
-						// cast to access the protected 'workflow' field
-						const workflowObj = (this as unknown as { workflow: { workspace?: IDataObject } })
-							.workflow;
-						const dirPath = normalizeOptionalString(workflowObj?.workspace?.__dirPath);
-						console.log('OpenClaw publish sync: resolving $workspace.__dirPath expression', {
-							rawValue: pluginDirectory,
-							workspaceAvailable: !!workflowObj?.workspace,
-							dirPath: dirPath ?? '(not set)',
-						});
-						if (dirPath) {
-							pluginDirectory = dirPath;
-						} else {
-							console.log('OpenClaw publish sync: $workspace.__dirPath is not available, skipping');
+					console.log('OpenClaw publish sync: processing plugin sub-node', {
+						type: pluginNode.type,
+						pluginSource,
+						params: JSON.stringify(params).slice(0, 300),
+					});
+
+					if (pluginSource === 'local') {
+						// Read pluginDirectory — may be an expression like ={{ $workspace.__dirPath }}
+						let pluginDirectory = (params.pluginDirectory as string) || '';
+
+						// If it's an expression referencing $workspace.__dirPath, resolve it manually
+						// from the workflow's workspace context (available at trigger/activation time)
+						if (
+							pluginDirectory.includes('$workspace.__dirPath') ||
+							pluginDirectory.includes('$workspace[')
+						) {
+							// Access the workflow's workspace context directly
+							// The underlying Workflow object is available through the TriggerContext
+							// cast to access the protected 'workflow' field
+							const workflowObj = (this as unknown as { workflow: { workspace?: IDataObject } })
+								.workflow;
+							const dirPath = normalizeOptionalString(workflowObj?.workspace?.__dirPath);
+							console.log('OpenClaw publish sync: resolving $workspace.__dirPath expression', {
+								rawValue: pluginDirectory,
+								workspaceAvailable: !!workflowObj?.workspace,
+								dirPath: dirPath ?? '(not set)',
+							});
+							if (dirPath) {
+								pluginDirectory = dirPath;
+							} else {
+								console.log(
+									'OpenClaw publish sync: $workspace.__dirPath is not available, skipping',
+								);
+								continue;
+							}
+						} else if (pluginDirectory.includes('{{') || pluginDirectory.startsWith('=')) {
+							// Other expressions we can't resolve at activation time
+							console.log(
+								'OpenClaw publish sync: pluginDirectory is an unresolvable expression, skipping',
+								{
+									rawValue: pluginDirectory,
+								},
+							);
 							continue;
 						}
-					} else if (pluginDirectory.includes('{{') || pluginDirectory.startsWith('=')) {
-						// Other expressions we can't resolve at activation time
-						console.log(
-							'OpenClaw publish sync: pluginDirectory is an unresolvable expression, skipping',
-							{
-								rawValue: pluginDirectory,
-							},
-						);
-						continue;
-					}
-					pluginDirectory = pluginDirectory.trim();
-					if (!pluginDirectory) {
-						console.log('OpenClaw publish sync: pluginDirectory is empty, skipping');
-						continue;
-					}
+						pluginDirectory = pluginDirectory.trim();
+						if (!pluginDirectory) {
+							console.log('OpenClaw publish sync: pluginDirectory is empty, skipping');
+							continue;
+						}
 
-					// Scan for manifest
-					const manifestPath = join(pluginDirectory, 'openclaw.plugin.json');
-					let pluginManifest: PluginConfig['pluginManifest'];
-					if (existsSync(manifestPath)) {
-						try {
-							const raw = readFileSync(manifestPath, 'utf8').trim();
-							const parsed = JSON.parse(raw) as IDataObject;
-							pluginManifest = {
-								id: typeof parsed.id === 'string' ? parsed.id : undefined,
-								name: typeof parsed.name === 'string' ? parsed.name : undefined,
-								description:
-									typeof parsed.description === 'string' ? parsed.description : undefined,
-								version: typeof parsed.version === 'string' ? parsed.version : undefined,
-								providers: Array.isArray(parsed.providers)
-									? (parsed.providers as unknown[]).filter(
-											(p): p is string => typeof p === 'string',
-										)
-									: undefined,
-								channels: Array.isArray(parsed.channels)
-									? (parsed.channels as unknown[]).filter((c): c is string => typeof c === 'string')
-									: undefined,
-							};
-							console.log('OpenClaw publish sync: loaded local manifest', {
-								manifestPath,
-								id: pluginManifest.id,
-								name: pluginManifest.name,
-							});
-						} catch (parseErr) {
-							console.log('OpenClaw publish sync: failed to parse manifest', {
-								manifestPath,
-								error: getErrorMessage(parseErr),
+						// Scan for manifest
+						const manifestPath = join(pluginDirectory, 'openclaw.plugin.json');
+						let pluginManifest: PluginConfig['pluginManifest'];
+						if (existsSync(manifestPath)) {
+							try {
+								const raw = readFileSync(manifestPath, 'utf8').trim();
+								const parsed = JSON.parse(raw) as IDataObject;
+								pluginManifest = {
+									id: typeof parsed.id === 'string' ? parsed.id : undefined,
+									name: typeof parsed.name === 'string' ? parsed.name : undefined,
+									description:
+										typeof parsed.description === 'string' ? parsed.description : undefined,
+									version: typeof parsed.version === 'string' ? parsed.version : undefined,
+									providers: Array.isArray(parsed.providers)
+										? (parsed.providers as unknown[]).filter(
+												(p): p is string => typeof p === 'string',
+											)
+										: undefined,
+									channels: Array.isArray(parsed.channels)
+										? (parsed.channels as unknown[]).filter(
+												(c): c is string => typeof c === 'string',
+											)
+										: undefined,
+								};
+								console.log('OpenClaw publish sync: loaded local manifest', {
+									manifestPath,
+									id: pluginManifest.id,
+									name: pluginManifest.name,
+								});
+							} catch (parseErr) {
+								console.log('OpenClaw publish sync: failed to parse manifest', {
+									manifestPath,
+									error: getErrorMessage(parseErr),
+								});
+							}
+						}
+
+						publishPluginConfigs.push({
+							pluginSource: 'local',
+							pluginPath: pluginDirectory,
+							pluginManifest,
+						});
+					} else if (pluginSource === 'cloud') {
+						const pluginId = ((params.pluginId as string) || '').trim();
+						const pluginVersion = ((params.pluginVersion as string) || '').trim() || undefined;
+						if (pluginId) {
+							publishPluginConfigs.push({
+								pluginSource: 'cloud',
+								pluginId,
+								pluginVersion,
 							});
 						}
 					}
+				}
 
-					publishPluginConfigs.push({
-						pluginSource: 'local',
-						pluginPath: pluginDirectory,
-						pluginManifest,
-					});
-				} else if (pluginSource === 'cloud') {
-					const pluginId = ((params.pluginId as string) || '').trim();
-					const pluginVersion = ((params.pluginVersion as string) || '').trim() || undefined;
-					if (pluginId) {
-						publishPluginConfigs.push({
-							pluginSource: 'cloud',
-							pluginId,
-							pluginVersion,
+				// Sync plugin configs to openclaw.json
+				if (publishPluginConfigs.length > 0) {
+					try {
+						const syncResult = syncPluginConfig({ pluginConfigs: publishPluginConfigs });
+						console.log('OpenClaw publish sync: plugin config synced on activation', {
+							installedCount: syncResult.installed.length,
+							installed: syncResult.installed,
+							errors: syncResult.errors.length > 0 ? syncResult.errors : undefined,
+							pluginCount: publishPluginConfigs.length,
+						});
+					} catch (syncErr) {
+						console.log('OpenClaw publish sync: plugin config sync failed on activation', {
+							error: getErrorMessage(syncErr),
 						});
 					}
+				} else {
+					console.log('OpenClaw publish sync: no plugin configs to sync on activation');
 				}
+			} catch (publishErr) {
+				console.log('OpenClaw publish sync: activation-time config sync failed (non-fatal)', {
+					error: getErrorMessage(publishErr),
+				});
 			}
-
-			// Sync plugin configs to openclaw.json
-			if (publishPluginConfigs.length > 0) {
-				try {
-					const syncResult = syncPluginConfig({ pluginConfigs: publishPluginConfigs });
-					console.log('OpenClaw publish sync: plugin config synced on activation', {
-						installedCount: syncResult.installed.length,
-						installed: syncResult.installed,
-						errors: syncResult.errors.length > 0 ? syncResult.errors : undefined,
-						pluginCount: publishPluginConfigs.length,
-					});
-				} catch (syncErr) {
-					console.log('OpenClaw publish sync: plugin config sync failed on activation', {
-						error: getErrorMessage(syncErr),
-					});
-				}
-			} else {
-				console.log('OpenClaw publish sync: no plugin configs to sync on activation');
-			}
-		} catch (publishErr) {
-			console.log('OpenClaw publish sync: activation-time config sync failed (non-fatal)', {
-				error: getErrorMessage(publishErr),
-			});
 		}
 
 		return {
