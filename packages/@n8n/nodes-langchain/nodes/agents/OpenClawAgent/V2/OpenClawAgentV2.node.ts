@@ -41,11 +41,27 @@ export interface ModelConfig {
 
 /**
  * Configuration returned by Plugin sub-nodes connected to the OpenClaw agent.
- * The pluginPath is used to discover and load plugins from the specified directory.
+ *
+ * - **local**: scans `pluginPath` for `openclaw.plugin.json` and loads manifest info.
+ * - **cloud**: references a ClawHub plugin by `pluginId` (e.g. "clawhub:openai").
  */
 export interface PluginConfig {
-	pluginPath: string;
-	pluginName?: string;
+	pluginSource: 'local' | 'cloud';
+	/** Directory path for local plugins (scanned for openclaw.plugin.json). */
+	pluginPath?: string;
+	/** Plugin manifest data loaded from openclaw.plugin.json (local source). */
+	pluginManifest?: {
+		id?: string;
+		name?: string;
+		description?: string;
+		version?: string;
+		providers?: string[];
+		channels?: string[];
+	};
+	/** ClawHub plugin package name (cloud source), e.g. "openai" or "@scope/pkg". */
+	pluginId?: string;
+	/** ClawHub plugin version (cloud source). Leave empty for latest. */
+	pluginVersion?: string;
 	extra?: IDataObject;
 }
 
@@ -1010,25 +1026,25 @@ export class OpenClawAgentV2 implements INodeType {
 				preview: pluginData ? JSON.stringify(pluginData).slice(0, 300) : undefined,
 			});
 
+			const isPluginConfig = (item: unknown): item is PluginConfig =>
+				isObject(item) && typeof (item as Record<string, unknown>).pluginSource === 'string';
+
 			if (Array.isArray(pluginData)) {
-				pluginConfigs = pluginData.filter(
-					(item): item is PluginConfig =>
-						isObject(item) && typeof (item as Record<string, unknown>).pluginPath === 'string',
-				);
-			} else if (
-				pluginData &&
-				isObject(pluginData) &&
-				typeof (pluginData as Record<string, unknown>).pluginPath === 'string'
-			) {
-				pluginConfigs = [pluginData as unknown as PluginConfig];
+				pluginConfigs = pluginData.filter(isPluginConfig);
+			} else if (pluginData && isPluginConfig(pluginData)) {
+				pluginConfigs = [pluginData];
 			}
 
 			if (pluginConfigs.length > 0) {
 				console.log('[OpenClawAgentV2] Plugin sub-nodes connected', {
 					count: pluginConfigs.length,
 					plugins: pluginConfigs.map((p) => ({
+						source: p.pluginSource,
 						path: p.pluginPath,
-						name: p.pluginName ?? '(unnamed)',
+						manifestId: p.pluginManifest?.id,
+						manifestName: p.pluginManifest?.name,
+						cloudId: p.pluginId,
+						cloudVersion: p.pluginVersion,
 					})),
 				});
 			} else {
@@ -1050,14 +1066,38 @@ export class OpenClawAgentV2 implements INodeType {
 
 				// Apply plugin configs — sync to openclaw.json and set env var
 				if (pluginConfigs.length > 0) {
-					const pluginPaths = pluginConfigs.map((p) => p.pluginPath).filter(Boolean);
+					const localPlugins = pluginConfigs.filter((p) => p.pluginSource === 'local');
+					const cloudPlugins = pluginConfigs.filter((p) => p.pluginSource === 'cloud');
 
-					console.log('[OpenClawAgentV2] Plugin paths to apply', {
+					const pluginPaths = localPlugins
+						.map((p) => p.pluginPath)
+						.filter((p): p is string => typeof p === 'string' && p.length > 0);
+
+					const cloudSpecs = cloudPlugins
+						.map((p) => {
+							if (!p.pluginId) return undefined;
+							return p.pluginVersion
+								? `clawhub:${p.pluginId}@${p.pluginVersion}`
+								: `clawhub:${p.pluginId}`;
+						})
+						.filter((s): s is string => typeof s === 'string');
+
+					console.log('[OpenClawAgentV2] Plugin configs to apply', {
 						itemIndex,
-						pluginCount: pluginPaths.length,
-						paths: pluginPaths,
+						localCount: localPlugins.length,
+						cloudCount: cloudPlugins.length,
+						localPaths: pluginPaths,
+						cloudSpecs,
+						manifests: localPlugins
+							.filter((p) => p.pluginManifest)
+							.map((p) => ({
+								id: p.pluginManifest?.id,
+								name: p.pluginManifest?.name,
+								version: p.pluginManifest?.version,
+							})),
 					});
 
+					// Sync local plugin paths to openclaw.json
 					if (pluginPaths.length > 0) {
 						try {
 							const pluginSync = syncPluginConfig({ pluginPaths });
@@ -1073,11 +1113,20 @@ export class OpenClawAgentV2 implements INodeType {
 							});
 						}
 
-						// Pass plugin paths via environment variable for the CLI
+						// Pass local plugin paths via environment variable for the CLI
 						openClawEnv.OPENCLAW_PLUGIN_PATHS = pluginPaths.join(';');
 						console.log('[OpenClawAgentV2] Set OPENCLAW_PLUGIN_PATHS env var', {
 							itemIndex,
 							value: openClawEnv.OPENCLAW_PLUGIN_PATHS,
+						});
+					}
+
+					// Pass cloud plugin specs via environment variable for the CLI
+					if (cloudSpecs.length > 0) {
+						openClawEnv.OPENCLAW_CLAWHUB_PLUGINS = cloudSpecs.join(';');
+						console.log('[OpenClawAgentV2] Set OPENCLAW_CLAWHUB_PLUGINS env var', {
+							itemIndex,
+							value: openClawEnv.OPENCLAW_CLAWHUB_PLUGINS,
 						});
 					}
 				}
