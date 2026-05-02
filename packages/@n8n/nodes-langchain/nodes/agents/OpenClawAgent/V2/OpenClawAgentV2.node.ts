@@ -68,7 +68,6 @@ const selectorTypeToCliFlag: Record<Exclude<SelectorType, 'default'>, string> = 
 
 const DEFAULT_TIMEOUT_SECONDS = 300;
 const CLI_SHUTDOWN_GRACE_SECONDS = 90;
-const GATEWAY_RESTART_TIMEOUT_SECONDS = 60;
 const OPENCLAW_CONFIG_PATH_ENV = 'OPENCLAW_CONFIG_PATH';
 const OPENCLAW_DEFAULT_ACCOUNT_ID = 'default';
 const OPEN_CODE_FREE_MODEL_SOURCE = 'opencode-free';
@@ -945,7 +944,6 @@ export class OpenClawAgentV2 implements INodeType {
 				}
 
 				const openClawEnv: NodeJS.ProcessEnv = {};
-				let configChanged = false;
 
 				// Apply channel configs
 				const telegramChannel = channelConfigs.find((c) => c.channelType === 'telegram');
@@ -953,12 +951,11 @@ export class OpenClawAgentV2 implements INodeType {
 
 				if (telegramChannel?.botToken) {
 					openClawEnv.TELEGRAM_BOT_TOKEN = telegramChannel.botToken;
-					const configSync = syncChannelConfig({
+					syncChannelConfig({
 						channelType: 'telegram',
 						botToken: telegramChannel.botToken,
 						replyAccount: telegramChannel.accountId,
 					});
-					configChanged = configSync.changed || configChanged;
 				}
 
 				// Apply WhatsApp channel config if present
@@ -968,12 +965,11 @@ export class OpenClawAgentV2 implements INodeType {
 					if (whatsappChannel.phoneNumberId) {
 						openClawEnv.WHATSAPP_PHONE_NUMBER_ID = whatsappChannel.phoneNumberId;
 					}
-					const configSync = syncChannelConfig({
+					syncChannelConfig({
 						channelType: 'whatsapp',
 						botToken: whatsappChannel.accessToken,
 						replyAccount: whatsappChannel.accountId,
 					});
-					configChanged = configSync.changed || configChanged;
 				}
 
 				let args = ['agent', '--message', message, '--json'];
@@ -1035,7 +1031,6 @@ export class OpenClawAgentV2 implements INodeType {
 					modelConfig,
 					modelId: resolvedModel,
 				});
-				configChanged = nineRouterConfigSync.changed || configChanged;
 				console.log('[OpenClawAgentV2] 9Router model config sync', {
 					itemIndex,
 					hasModelSubNode: !!modelConfig,
@@ -1048,6 +1043,7 @@ export class OpenClawAgentV2 implements INodeType {
 					modelRef: nineRouterConfigSync.modelRef,
 					configPath: nineRouterConfigSync.configPath,
 					existingBaseUrl: nineRouterConfigSync.existingBaseUrl,
+					restart: 'publish-only',
 				});
 
 				const thinking = normalizeOptionalString(this.getNodeParameter('thinking', itemIndex));
@@ -1106,26 +1102,6 @@ export class OpenClawAgentV2 implements INodeType {
 						`Working directory does not exist or is not a directory: ${workingDirectory}`,
 						{ itemIndex },
 					);
-				}
-
-				if (configChanged && !runLocally) {
-					const restartResult = await runOpenClawCli({
-						binaryPath,
-						args: ['gateway', 'restart'],
-						cwd: workingDirectory,
-						timeoutMs: GATEWAY_RESTART_TIMEOUT_SECONDS * 1000,
-						env: openClawEnv,
-						abortSignal: this.getExecutionCancelSignal(),
-					});
-					if (restartResult.exitCode !== 0) {
-						throw new NodeOperationError(
-							this.getNode(),
-							restartResult.stderr.trim() ||
-								restartResult.stdout.trim() ||
-								`OpenClaw Gateway restart exited with code ${restartResult.exitCode ?? `signal ${restartResult.signal}`}`,
-							{ itemIndex },
-						);
-					}
 				}
 
 				const systemMessage = normalizeOptionalString(
