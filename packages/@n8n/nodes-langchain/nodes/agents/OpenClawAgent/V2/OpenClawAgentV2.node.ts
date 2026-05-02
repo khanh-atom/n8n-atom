@@ -495,6 +495,7 @@ export class OpenClawAgentV2 implements INodeType {
 					type: NodeConnectionTypes.AiLanguageModel,
 					displayName: 'Model',
 					required: false,
+					maxConnections: 1,
 				},
 			],
 			outputs: [NodeConnectionTypes.Main],
@@ -570,13 +571,6 @@ export class OpenClawAgentV2 implements INodeType {
 					default: '',
 					description: 'Recipient or channel target passed to OpenClaw as --to',
 					displayOptions: { show: { selectorType: ['recipient'] } },
-				},
-				{
-					displayName: 'Model',
-					name: 'model',
-					type: 'string',
-					default: 'openai-codex/gpt-5.5',
-					description: 'Model override for this run',
 				},
 				{
 					displayName: 'Thinking Level',
@@ -835,15 +829,13 @@ export class OpenClawAgentV2 implements INodeType {
 					}
 				}
 
-				// Resolve model: connected Model sub-node takes precedence over text parameter
-				const paramModel = normalizeOptionalString(this.getNodeParameter('model', itemIndex));
-				const resolvedModel = modelConfig?.modelId ?? paramModel;
+				// Resolve model from connected Model sub-node
+				const resolvedModel = modelConfig?.modelId;
 				console.log('[OpenClawAgentV2] Model resolution', {
 					itemIndex,
-					paramModel,
 					connectedModel: modelConfig?.modelId,
 					resolvedModel,
-					modelSource: modelConfig?.modelSource ?? 'text-parameter',
+					modelSource: modelConfig?.modelSource ?? 'none',
 				});
 				if (resolvedModel) {
 					args.push('--model', resolvedModel);
