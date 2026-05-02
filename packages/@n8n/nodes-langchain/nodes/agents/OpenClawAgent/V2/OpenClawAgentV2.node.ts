@@ -1068,13 +1068,16 @@ export class OpenClawAgentV2 implements INodeType {
 
 		// Retrieve plugin configs from connected Plugin sub-nodes
 		let pluginConfigs: PluginConfig[] = [];
+		console.log('[OpenClawAgentV2] About to retrieve Plugin sub-node data via AiTool connection');
 		try {
 			const pluginData = await this.getInputConnectionData(NodeConnectionTypes.AiTool, 0);
 			console.log('[OpenClawAgentV2] Raw plugin data from getInputConnectionData', {
 				type: typeof pluginData,
+				isNull: pluginData === null,
+				isUndefined: pluginData === undefined,
 				isArray: Array.isArray(pluginData),
 				isObject: isObject(pluginData),
-				preview: pluginData ? JSON.stringify(pluginData).slice(0, 300) : undefined,
+				preview: pluginData ? JSON.stringify(pluginData).slice(0, 500) : '(empty)',
 			});
 
 			const isPluginConfig = (item: unknown): item is PluginConfig =>
@@ -1101,9 +1104,17 @@ export class OpenClawAgentV2 implements INodeType {
 			} else {
 				console.log('[OpenClawAgentV2] No valid Plugin sub-nodes connected');
 			}
-		} catch {
-			// No plugins connected — that's fine
-			console.log('[OpenClawAgentV2] No Plugin sub-nodes connected (no AiTool input)');
+		} catch (pluginErr) {
+			// Log the actual error — this is critical for troubleshooting
+			console.log('[OpenClawAgentV2] Plugin sub-node connection FAILED', {
+				errorType: pluginErr instanceof Error ? pluginErr.constructor.name : typeof pluginErr,
+				errorMessage: pluginErr instanceof Error ? pluginErr.message : String(pluginErr),
+				errorStack:
+					pluginErr instanceof Error
+						? pluginErr.stack?.split('\n').slice(0, 5).join('\n')
+						: undefined,
+			});
+			console.log('[OpenClawAgentV2] No Plugin sub-nodes connected (AiTool input error)');
 		}
 		console.log('OpenClaw publish sync: resolved plugin sync candidates', {
 			pluginCount: pluginConfigs.length,

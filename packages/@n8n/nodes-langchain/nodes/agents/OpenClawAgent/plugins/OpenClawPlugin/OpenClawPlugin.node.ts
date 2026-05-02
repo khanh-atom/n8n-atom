@@ -201,6 +201,16 @@ export class OpenClawPlugin implements INodeType {
 	};
 
 	async supplyData(this: ISupplyDataFunctions, itemIndex: number): Promise<SupplyData> {
+		const node = this.getNode();
+		console.log('[OpenClawPlugin] supplyData ENTRY', {
+			nodeName: node.name,
+			nodeId: node.id,
+			nodeType: node.type,
+			itemIndex,
+			parameterNames: Object.keys(node.parameters ?? {}),
+			rawParameters: JSON.stringify(node.parameters ?? {}).slice(0, 500),
+		});
+
 		const pluginSource = this.getNodeParameter('pluginSource', itemIndex, 'local') as
 			| 'local'
 			| 'cloud';
@@ -211,13 +221,15 @@ export class OpenClawPlugin implements INodeType {
 		});
 
 		if (pluginSource === 'local') {
-			const pluginDirectory = (
-				this.getNodeParameter('pluginDirectory', itemIndex, '') as string
-			).trim();
+			const rawPluginDirectory = this.getNodeParameter('pluginDirectory', itemIndex, '') as string;
+			const pluginDirectory = rawPluginDirectory.trim();
 
 			console.log('[OpenClawPlugin] Local source: scanning directory', {
 				itemIndex,
+				rawPluginDirectory,
 				pluginDirectory,
+				isEmpty: !pluginDirectory,
+				length: pluginDirectory.length,
 			});
 
 			if (!pluginDirectory) {
