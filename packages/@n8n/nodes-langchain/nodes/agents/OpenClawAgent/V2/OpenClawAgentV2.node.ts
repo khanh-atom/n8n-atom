@@ -100,6 +100,42 @@ function normalizeLowercaseStringOrEmpty(value: string | undefined): string {
 	return (value ?? '').trim().toLowerCase();
 }
 
+function getObjectKeys(value: unknown): string[] | undefined {
+	if (!isObject(value)) {
+		return undefined;
+	}
+	return Object.keys(value);
+}
+
+function getModelDataPreview(value: unknown): string | undefined {
+	if (value === undefined || value === null) {
+		return undefined;
+	}
+	if (typeof value === 'string') {
+		return value.length <= 300 ? value : `${value.slice(0, 300)}...`;
+	}
+	if (typeof value !== 'object') {
+		return String(value);
+	}
+	if (Array.isArray(value)) {
+		return `[array length=${value.length}]`;
+	}
+	if (isObject(value)) {
+		const modelId = normalizeOptionalString(value.modelId);
+		const modelSource = normalizeOptionalString(value.modelSource);
+		const extra = isObject(value.extra) ? value.extra : undefined;
+		if (modelId || modelSource || extra) {
+			return JSON.stringify({
+				modelId,
+				modelSource,
+				extraKeys: getObjectKeys(extra),
+			});
+		}
+		return `[object keys=${Object.keys(value).slice(0, 20).join(',')}]`;
+	}
+	return undefined;
+}
+
 function getModelProvider(modelId: string | undefined): string | undefined {
 	const provider = modelId?.split('/')[0];
 	return normalizeOptionalString(provider);
@@ -720,7 +756,7 @@ export class OpenClawAgentV2 implements INodeType {
 					modelData && typeof modelData === 'object' && !Array.isArray(modelData)
 						? Object.keys(modelData as object)
 						: undefined,
-				preview: JSON.stringify(modelData)?.substring(0, 300),
+				preview: getModelDataPreview(modelData),
 			});
 
 			// Extract the model config — may come as a single object or wrapped in an array
@@ -742,6 +778,9 @@ export class OpenClawAgentV2 implements INodeType {
 				console.log('[OpenClawAgentV2] Model sub-node connected', {
 					modelId: modelConfig.modelId,
 					modelSource: modelConfig.modelSource,
+					extraKeys: getObjectKeys(modelConfig.extra),
+					baseUrl: normalizeOptionalString(modelConfig.extra?.baseUrl),
+					api: normalizeOptionalString(modelConfig.extra?.api),
 				});
 			} else if (candidate) {
 				// Data came back but doesn't match ModelConfig shape — log for debugging
@@ -752,7 +791,7 @@ export class OpenClawAgentV2 implements INodeType {
 						? typeof (candidate as Record<string, unknown>).modelId
 						: 'n/a',
 					candidateKeys: isObject(candidate) ? Object.keys(candidate as object) : [],
-					candidatePreview: JSON.stringify(candidate)?.substring(0, 300),
+					candidatePreview: getModelDataPreview(candidate),
 				});
 			}
 		} catch (err) {

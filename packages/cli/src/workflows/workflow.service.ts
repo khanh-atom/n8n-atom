@@ -533,13 +533,16 @@ export class WorkflowService {
 			candidateCount: candidates.length,
 			agents: inspection.agentDiagnostics,
 			modelConnections: inspection.modelConnections,
-			candidates: candidates.map(({ agentNodeName, agentId, modelId, source, modelNodeName }) => ({
-				agentNodeName,
-				agentId,
-				modelId,
-				source,
-				modelNodeName,
-			})),
+			candidates: candidates.map(
+				({ agentNodeName, agentId, modelId, source, modelNodeName, modelNodeType }) => ({
+					agentNodeName,
+					agentId,
+					modelId,
+					source,
+					modelNodeName,
+					modelNodeType,
+				}),
+			),
 		});
 
 		if (candidates.length === 0) {
@@ -579,10 +582,12 @@ export class WorkflowService {
 					modelId,
 					source,
 					modelNodeName,
+					modelNodeType,
 					existingModel,
 					targetPath,
 					changed,
 					openCodeFreeAuth,
+					nineRouterProvider,
 					sessionModel,
 				}) => ({
 					agentNodeName,
@@ -590,10 +595,12 @@ export class WorkflowService {
 					modelId,
 					source,
 					modelNodeName,
+					modelNodeType,
 					existingModel,
 					targetPath,
 					changed,
 					openCodeFreeAuth,
+					nineRouterProvider,
 					sessionModel,
 				}),
 			),

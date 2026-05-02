@@ -1,5 +1,6 @@
 import { ChatOpenAI, type ClientOptions } from '@langchain/openai';
 import {
+	type IDataObject,
 	NodeConnectionTypes,
 	type INodeType,
 	type INodeTypeDescription,
@@ -14,6 +15,28 @@ import type { OpenAICompatibleCredential } from '../../../types/types';
 import { openAiFailedAttemptHandler } from '../../vendors/OpenAi/helpers/error-handling';
 import { makeN8nLlmFailedAttemptHandler } from '../n8nLlmFailedAttemptHandler';
 import { N8nLlmTracing } from '../N8nLlmTracing';
+import type { ModelConfig } from '../../agents/OpenClawAgent/V2/OpenClawAgentV2.node';
+
+const NINE_ROUTER_OPENCLAW_PROVIDER = '9router';
+const NINE_ROUTER_OPENCLAW_MODEL_SOURCE = '9router';
+const NINE_ROUTER_OPENCLAW_API = 'openai-completions';
+const NINE_ROUTER_DEFAULT_BASE_URL = 'http://localhost:20128/api/v1';
+
+function normalizeOptionalString(value: unknown): string | undefined {
+	if (typeof value !== 'string') {
+		return undefined;
+	}
+	const trimmed = value.trim();
+	return trimmed || undefined;
+}
+
+function toOpenClawNineRouterModelId(modelName: string): string {
+	const normalizedModelName = normalizeOptionalString(modelName) ?? 'auto';
+	const providerPrefix = `${NINE_ROUTER_OPENCLAW_PROVIDER}/`;
+	return normalizedModelName.toLowerCase().startsWith(providerPrefix)
+		? normalizedModelName
+		: `${NINE_ROUTER_OPENCLAW_PROVIDER}/${normalizedModelName}`;
+}
 
 export class LmChat9Router implements INodeType {
 	description: INodeTypeDescription = {
@@ -74,7 +97,7 @@ export class LmChat9Router implements INodeType {
 				name: 'model',
 				type: 'options',
 				description:
-					'The model which will generate the completion. <a href="http://localhost:20128">Learn more</a>.',
+					'The model which will generate the completion. <a href="https://github.com/9router/9router">Learn more</a>.',
 				typeOptions: {
 					loadOptions: {
 						routing: {
@@ -213,6 +236,8 @@ export class LmChat9Router implements INodeType {
 		const credentials = await this.getCredentials<OpenAICompatibleCredential>('nineRouterApi');
 
 		const modelName = this.getNodeParameter('model', itemIndex) as string;
+		const baseURL = normalizeOptionalString(credentials.url) ?? NINE_ROUTER_DEFAULT_BASE_URL;
+		const hasApiKey = normalizeOptionalString(credentials.apiKey) !== undefined;
 
 		const options = this.getNodeParameter('options', itemIndex, {}) as {
 			frequencyPenalty?: number;
@@ -226,9 +251,9 @@ export class LmChat9Router implements INodeType {
 		};
 
 		const configuration: ClientOptions = {
-			baseURL: credentials.url,
+			baseURL,
 			fetchOptions: {
-				dispatcher: getProxyAgent(credentials.url),
+				dispatcher: getProxyAgent(baseURL),
 			},
 		};
 
@@ -246,6 +271,28 @@ export class LmChat9Router implements INodeType {
 					}
 				: undefined,
 			onFailedAttempt: makeN8nLlmFailedAttemptHandler(this, openAiFailedAttemptHandler),
+		});
+
+		const openClawModelConfig: ModelConfig = {
+			modelId: toOpenClawNineRouterModelId(modelName),
+			modelSource: NINE_ROUTER_OPENCLAW_MODEL_SOURCE,
+			extra: {
+				baseUrl: baseURL,
+				api: NINE_ROUTER_OPENCLAW_API,
+				hasApiKey,
+			} satisfies IDataObject,
+		};
+
+		Object.assign(model, openClawModelConfig);
+
+		console.log('[LmChat9Router] returning model with OpenClaw metadata', {
+			itemIndex,
+			modelName,
+			openClawModelId: openClawModelConfig.modelId,
+			modelSource: openClawModelConfig.modelSource,
+			baseUrl: baseURL,
+			api: NINE_ROUTER_OPENCLAW_API,
+			hasApiKey,
 		});
 
 		return {

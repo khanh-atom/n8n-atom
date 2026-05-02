@@ -6,6 +6,7 @@ import { NodeConnectionTypes, UnexpectedError, jsonParse } from 'n8n-workflow';
 const OPENCLAW_AGENT_NODE_TYPE = '@n8n/n8n-nodes-langchain.openClawAgent';
 const OPENCLAW_OPEN_CODE_FREE_MODEL_NODE_TYPE =
 	'@n8n/n8n-nodes-langchain.openClawOpenCodeFreeModel';
+const OPENCLAW_NINE_ROUTER_MODEL_NODE_TYPE = '@n8n/n8n-nodes-langchain.lmChat9Router';
 const OPENCLAW_CONFIG_PATH_ENV = 'OPENCLAW_CONFIG_PATH';
 const OPENCLAW_DEFAULT_AGENT_ID = 'main';
 const OPENCLAW_DEFAULT_OPEN_CODE_MODEL = 'opencode/big-pickle';
@@ -16,6 +17,12 @@ const OPENCLAW_OPEN_CODE_FREE_PUBLIC_KEY = 'public';
 const OPENCLAW_STATE_DIR_ENV = 'OPENCLAW_STATE_DIR';
 const OPENCLAW_MAIN_SESSION_KEY_SEGMENT = 'main';
 const OPENCLAW_SESSION_STORE_FILE = 'sessions.json';
+const OPENCLAW_NINE_ROUTER_PROVIDER = '9router';
+const OPENCLAW_NINE_ROUTER_DEFAULT_MODEL = 'auto';
+const OPENCLAW_NINE_ROUTER_DEFAULT_BASE_URL = 'http://localhost:20128/api/v1';
+const OPENCLAW_NINE_ROUTER_API = 'openai-completions';
+const OPENCLAW_NINE_ROUTER_CONTEXT_WINDOW = 128_000;
+const OPENCLAW_NINE_ROUTER_MAX_TOKENS = 32_000;
 
 export type OpenClawModelSyncCandidate = {
 	agentNodeName: string;
@@ -23,6 +30,7 @@ export type OpenClawModelSyncCandidate = {
 	modelId: string;
 	source: 'connected-model' | 'agent-parameter';
 	modelNodeName?: string;
+	modelNodeType?: string;
 };
 
 export type OpenClawModelSyncAgentDiagnostic = {
@@ -32,6 +40,7 @@ export type OpenClawModelSyncAgentDiagnostic = {
 	agentId?: string;
 	parameterModel?: string;
 	connectedModelNodeName?: string;
+	connectedModelNodeType?: string;
 	connectedModelId?: string;
 	resolvedModelId?: string;
 	status: 'candidate' | 'skipped';
@@ -62,6 +71,7 @@ export type OpenClawModelSyncResult = OpenClawModelSyncCandidate & {
 	existingModel?: string;
 	targetPath: string;
 	openCodeFreeAuth?: OpenClawOpenCodeFreeAuthSyncResult;
+	nineRouterProvider?: OpenClawNineRouterProviderSyncResult;
 	sessionModel?: OpenClawSessionModelSyncResult;
 };
 
@@ -70,6 +80,18 @@ export type OpenClawOpenCodeFreeAuthSyncResult = {
 	envVar: string;
 	targetPath?: string;
 	reason: 'configured-public-env' | 'existing-auth' | 'not-open-code-free';
+};
+
+export type OpenClawNineRouterProviderSyncResult = {
+	changed: boolean;
+	provider: string;
+	model?: string;
+	baseUrl?: string;
+	api: typeof OPENCLAW_NINE_ROUTER_API;
+	targetPath?: string;
+	existingBaseUrl?: string;
+	existingApi?: string;
+	reason: 'updated-provider' | 'already-current' | 'not-nine-router' | 'invalid-model-id';
 };
 
 export type OpenClawSessionModelSyncResult = {
@@ -191,6 +213,22 @@ function ensureDataObject(parent: IDataObject, key: string): IDataObject {
 	return next;
 }
 
+function setConfigValue(target: IDataObject, key: string, value: unknown): boolean {
+	if (target[key] === value) {
+		return false;
+	}
+	target[key] = value as IDataObject[string];
+	return true;
+}
+
+function setDefaultConfigValue(target: IDataObject, key: string, value: unknown): boolean {
+	if (target[key] !== undefined) {
+		return false;
+	}
+	target[key] = value as IDataObject[string];
+	return true;
+}
+
 function getModelPrimary(value: unknown): string | undefined {
 	if (typeof value === 'string') {
 		return normalizeOptionalString(value);
@@ -215,11 +253,35 @@ function parseModelRef(modelId: string): { provider: string; model: string } | u
 	return { provider, model };
 }
 
+function toOpenClawNineRouterModelId(rawModel: unknown): string {
+	const model = normalizeOptionalString(rawModel) ?? OPENCLAW_NINE_ROUTER_DEFAULT_MODEL;
+	const providerPrefix = `${OPENCLAW_NINE_ROUTER_PROVIDER}/`;
+	return model.toLowerCase().startsWith(providerPrefix) ? model : `${providerPrefix}${model}`;
+}
+
+function getConnectedOpenClawModelId(modelNode: INode): string | undefined {
+	if (modelNode.type === OPENCLAW_OPEN_CODE_FREE_MODEL_NODE_TYPE) {
+		return normalizeOptionalString(modelNode.parameters.model) ?? OPENCLAW_DEFAULT_OPEN_CODE_MODEL;
+	}
+	if (modelNode.type === OPENCLAW_NINE_ROUTER_MODEL_NODE_TYPE) {
+		return toOpenClawNineRouterModelId(modelNode.parameters.model);
+	}
+	return undefined;
+}
+
 function isOpenCodeFreeModelCandidate(candidate: OpenClawModelSyncCandidate): boolean {
 	return (
 		candidate.source === 'connected-model' &&
 		normalizeLowercaseStringOrEmpty(getModelProvider(candidate.modelId)) ===
 			OPENCLAW_OPEN_CODE_FREE_PROVIDER
+	);
+}
+
+function isNineRouterModelCandidate(candidate: OpenClawModelSyncCandidate): boolean {
+	return (
+		candidate.source === 'connected-model' &&
+		normalizeLowercaseStringOrEmpty(getModelProvider(candidate.modelId)) ===
+			OPENCLAW_NINE_ROUTER_PROVIDER
 	);
 }
 
@@ -286,6 +348,105 @@ function syncOpenCodeFreePublicAuth(
 		envVar: OPENCLAW_OPEN_CODE_FREE_ENV_VAR,
 		targetPath: `env.vars.${OPENCLAW_OPEN_CODE_FREE_ENV_VAR}`,
 		reason: 'configured-public-env',
+	};
+}
+
+function getNineRouterModelDefinition(model: string): IDataObject {
+	return {
+		id: model,
+		name: model === OPENCLAW_NINE_ROUTER_DEFAULT_MODEL ? '9Router Auto' : model,
+		api: OPENCLAW_NINE_ROUTER_API,
+		reasoning: false,
+		input: ['text', 'image'],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: OPENCLAW_NINE_ROUTER_CONTEXT_WINDOW,
+		maxTokens: OPENCLAW_NINE_ROUTER_MAX_TOKENS,
+	};
+}
+
+function syncNineRouterProviderConfig(
+	config: IDataObject,
+	candidate: OpenClawModelSyncCandidate,
+): OpenClawNineRouterProviderSyncResult {
+	if (!isNineRouterModelCandidate(candidate)) {
+		return {
+			changed: false,
+			provider: OPENCLAW_NINE_ROUTER_PROVIDER,
+			api: OPENCLAW_NINE_ROUTER_API,
+			reason: 'not-nine-router',
+		};
+	}
+
+	const modelRef = parseModelRef(candidate.modelId);
+	if (!modelRef || modelRef.provider !== OPENCLAW_NINE_ROUTER_PROVIDER) {
+		return {
+			changed: false,
+			provider: OPENCLAW_NINE_ROUTER_PROVIDER,
+			api: OPENCLAW_NINE_ROUTER_API,
+			reason: 'invalid-model-id',
+		};
+	}
+
+	const models = ensureDataObject(config, 'models');
+	const providers = ensureDataObject(models, 'providers');
+	const provider = ensureDataObject(providers, OPENCLAW_NINE_ROUTER_PROVIDER);
+	const existingBaseUrl = normalizeOptionalString(provider.baseUrl);
+	const existingApi = normalizeOptionalString(provider.api);
+
+	let changed = false;
+	changed =
+		setDefaultConfigValue(provider, 'baseUrl', OPENCLAW_NINE_ROUTER_DEFAULT_BASE_URL) || changed;
+	changed = setConfigValue(provider, 'api', OPENCLAW_NINE_ROUTER_API) || changed;
+
+	let providerModels: IDataObject[];
+	if (Array.isArray(provider.models)) {
+		providerModels = provider.models.filter(isObject) as IDataObject[];
+		if (providerModels.length !== provider.models.length) {
+			provider.models = providerModels;
+			changed = true;
+		}
+	} else {
+		providerModels = [];
+		provider.models = providerModels;
+		changed = true;
+	}
+
+	const existingModel = providerModels.find(
+		(model) => normalizeOptionalString(model.id) === modelRef.model,
+	);
+
+	if (existingModel) {
+		changed = setConfigValue(existingModel, 'api', OPENCLAW_NINE_ROUTER_API) || changed;
+		changed = setDefaultConfigValue(existingModel, 'name', modelRef.model) || changed;
+		changed = setDefaultConfigValue(existingModel, 'reasoning', false) || changed;
+		changed = setDefaultConfigValue(existingModel, 'input', ['text', 'image']) || changed;
+		changed =
+			setDefaultConfigValue(existingModel, 'cost', {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+			}) || changed;
+		changed =
+			setDefaultConfigValue(existingModel, 'contextWindow', OPENCLAW_NINE_ROUTER_CONTEXT_WINDOW) ||
+			changed;
+		changed =
+			setDefaultConfigValue(existingModel, 'maxTokens', OPENCLAW_NINE_ROUTER_MAX_TOKENS) || changed;
+	} else {
+		providerModels.push(getNineRouterModelDefinition(modelRef.model));
+		changed = true;
+	}
+
+	return {
+		changed,
+		provider: OPENCLAW_NINE_ROUTER_PROVIDER,
+		model: modelRef.model,
+		baseUrl: normalizeOptionalString(provider.baseUrl),
+		api: OPENCLAW_NINE_ROUTER_API,
+		targetPath: `models.providers.${OPENCLAW_NINE_ROUTER_PROVIDER}`,
+		existingBaseUrl,
+		existingApi,
+		reason: changed ? 'updated-provider' : 'already-current',
 	};
 }
 
@@ -468,6 +629,13 @@ function getOpenClawAgentConfigTarget(
 	return { target: list[1], targetPath: `agents.list[id=${agentId}].model` };
 }
 
+function isSupportedOpenClawModelNode(node: INode | undefined): boolean {
+	return (
+		node?.type === OPENCLAW_OPEN_CODE_FREE_MODEL_NODE_TYPE ||
+		node?.type === OPENCLAW_NINE_ROUTER_MODEL_NODE_TYPE
+	);
+}
+
 function findConnectedOpenClawModelNode(
 	agentNode: INode,
 	nodesByName: Map<string, INode>,
@@ -475,7 +643,7 @@ function findConnectedOpenClawModelNode(
 ): INode | undefined {
 	for (const [sourceNodeName, sourceConnections] of Object.entries(connections)) {
 		const sourceNode = nodesByName.get(sourceNodeName);
-		if (sourceNode?.type !== OPENCLAW_OPEN_CODE_FREE_MODEL_NODE_TYPE) {
+		if (!isSupportedOpenClawModelNode(sourceNode)) {
 			continue;
 		}
 
@@ -517,7 +685,7 @@ function inspectOpenClawModelConnections(
 					connectionCount++;
 					const targetNode = nodesByName.get(connection.node);
 					const isOpenClawModelConnection =
-						sourceNode?.type === OPENCLAW_OPEN_CODE_FREE_MODEL_NODE_TYPE &&
+						isSupportedOpenClawModelNode(sourceNode) &&
 						targetNode?.type === OPENCLAW_AGENT_NODE_TYPE &&
 						connection.type === NodeConnectionTypes.AiLanguageModel;
 
@@ -548,9 +716,7 @@ export function inspectOpenClawModelSyncCandidates(
 	const candidates: OpenClawModelSyncCandidate[] = [];
 	const agentDiagnostics: OpenClawModelSyncAgentDiagnostic[] = [];
 	const agentNodeCount = nodes.filter((node) => node.type === OPENCLAW_AGENT_NODE_TYPE).length;
-	const modelNodeCount = nodes.filter(
-		(node) => node.type === OPENCLAW_OPEN_CODE_FREE_MODEL_NODE_TYPE,
-	).length;
+	const modelNodeCount = nodes.filter((node) => isSupportedOpenClawModelNode(node)).length;
 	const connectionInspection = inspectOpenClawModelConnections(nodesByName, connections);
 
 	for (const agentNode of nodes) {
@@ -587,8 +753,7 @@ export function inspectOpenClawModelSyncCandidates(
 
 		const connectedModelNode = findConnectedOpenClawModelNode(agentNode, nodesByName, connections);
 		const connectedModel = connectedModelNode
-			? (normalizeOptionalString(connectedModelNode.parameters.model) ??
-				OPENCLAW_DEFAULT_OPEN_CODE_MODEL)
+			? getConnectedOpenClawModelId(connectedModelNode)
 			: undefined;
 		const parameterModel = normalizeOptionalString(agentNode.parameters.model);
 		const modelId = connectedModel ?? parameterModel;
@@ -598,6 +763,7 @@ export function inspectOpenClawModelSyncCandidates(
 				...diagnosticBase,
 				parameterModel,
 				connectedModelNodeName: connectedModelNode?.name,
+				connectedModelNodeType: connectedModelNode?.type,
 				connectedModelId: connectedModel,
 				status: 'skipped',
 				reason: 'missing-model',
@@ -611,11 +777,13 @@ export function inspectOpenClawModelSyncCandidates(
 			modelId,
 			source: connectedModelNode ? 'connected-model' : 'agent-parameter',
 			modelNodeName: connectedModelNode?.name,
+			modelNodeType: connectedModelNode?.type,
 		});
 		agentDiagnostics.push({
 			...diagnosticBase,
 			parameterModel,
 			connectedModelNodeName: connectedModelNode?.name,
+			connectedModelNodeType: connectedModelNode?.type,
 			connectedModelId: connectedModel,
 			resolvedModelId: modelId,
 			status: 'candidate',
@@ -661,15 +829,23 @@ export function syncOpenClawModelConfigCandidates(candidates: OpenClawModelSyncC
 		const existingModel = getModelPrimary(target.model);
 		const candidateChanged = setModelPrimary(target, 'model', candidate.modelId);
 		const openCodeFreeAuth = syncOpenCodeFreePublicAuth(config, candidate);
+		const nineRouterProvider = syncNineRouterProviderConfig(config, candidate);
 		const sessionModel = syncOpenClawSessionModel(configPath, candidate);
-		configChanged = candidateChanged || openCodeFreeAuth.changed || configChanged;
-		changed = candidateChanged || openCodeFreeAuth.changed || sessionModel.changed || changed;
+		configChanged =
+			candidateChanged || openCodeFreeAuth.changed || nineRouterProvider.changed || configChanged;
+		changed =
+			candidateChanged ||
+			openCodeFreeAuth.changed ||
+			nineRouterProvider.changed ||
+			sessionModel.changed ||
+			changed;
 		results.push({
 			...candidate,
 			changed: candidateChanged,
 			existingModel,
 			targetPath,
 			openCodeFreeAuth,
+			nineRouterProvider,
 			sessionModel,
 		});
 	}
