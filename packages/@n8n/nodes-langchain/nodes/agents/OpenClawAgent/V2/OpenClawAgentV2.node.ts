@@ -39,6 +39,16 @@ export interface ModelConfig {
 	extra?: IDataObject;
 }
 
+/**
+ * Configuration returned by Plugin sub-nodes connected to the OpenClaw agent.
+ * The pluginPath is used to discover and load plugins from the specified directory.
+ */
+export interface PluginConfig {
+	pluginPath: string;
+	pluginName?: string;
+	extra?: IDataObject;
+}
+
 interface OpenClawProcessResult {
 	stdout: string;
 	stderr: string;
@@ -427,6 +437,54 @@ function syncNineRouterModelConfig(params: {
 	};
 }
 
+function syncPluginConfig(params: {
+	pluginPaths: string[];
+}): { changed: boolean; configPath: string } {
+	const configPath = getOpenClawConfigPath();
+	if (!configPath) {
+		throw new ApplicationError(
+			`Could not determine OpenClaw config path. Set ${OPENCLAW_CONFIG_PATH_ENV} or HOME for the n8n process.`,
+		);
+	}
+	const config = readOpenClawConfig(configPath);
+	const plugins = ensureDataObject(config, 'plugins');
+
+	let changed = false;
+
+	// Ensure paths array exists
+	let existingPaths: string[];
+	if (Array.isArray(plugins.paths)) {
+		existingPaths = plugins.paths.filter((p): p is string => typeof p === 'string');
+	} else {
+		existingPaths = [];
+	}
+
+	// Merge new paths, avoiding duplicates
+	const mergedPaths = [...existingPaths];
+	for (const pluginPath of params.pluginPaths) {
+		if (!mergedPaths.includes(pluginPath)) {
+			mergedPaths.push(pluginPath);
+			changed = true;
+		}
+	}
+
+	if (changed) {
+		plugins.paths = mergedPaths as unknown as IDataObject[string];
+		mkdirSync(dirname(configPath), { recursive: true });
+		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+	}
+
+	console.log('[OpenClawAgentV2] syncPluginConfig: result', {
+		existingPathCount: existingPaths.length,
+		newPathCount: params.pluginPaths.length,
+		mergedPathCount: mergedPaths.length,
+		changed,
+		configPath,
+	});
+
+	return { changed, configPath };
+}
+
 function parseOpenClawOutput(stdout: string): IDataObject {
 	const trimmed = stdout.trim();
 	if (!trimmed) {
@@ -667,6 +725,11 @@ export class OpenClawAgentV2 implements INodeType {
 					displayName: 'Model',
 					required: false,
 					maxConnections: 1,
+				},
+				{
+					type: NodeConnectionTypes.AiTool,
+					displayName: 'Plugin',
+					required: false,
 				},
 			],
 			outputs: [NodeConnectionTypes.Main],
@@ -930,10 +993,50 @@ export class OpenClawAgentV2 implements INodeType {
 				});
 			}
 		} catch (err) {
-			// No model connected — that's fine, will use the text parameter
+			// No model connected — that's fine, will use the parameter
 			console.log('[OpenClawAgentV2] No Model sub-node connected, using text parameter fallback', {
 				error: err instanceof Error ? err.message : String(err),
 			});
+		}
+
+		// Retrieve plugin configs from connected Plugin sub-nodes
+		let pluginConfigs: PluginConfig[] = [];
+		try {
+			const pluginData = await this.getInputConnectionData(NodeConnectionTypes.AiTool, 0);
+			console.log('[OpenClawAgentV2] Raw plugin data from getInputConnectionData', {
+				type: typeof pluginData,
+				isArray: Array.isArray(pluginData),
+				isObject: isObject(pluginData),
+				preview: pluginData ? JSON.stringify(pluginData).slice(0, 300) : undefined,
+			});
+
+			if (Array.isArray(pluginData)) {
+				pluginConfigs = pluginData.filter(
+					(item): item is PluginConfig =>
+						isObject(item) && typeof (item as Record<string, unknown>).pluginPath === 'string',
+				);
+			} else if (
+				pluginData &&
+				isObject(pluginData) &&
+				typeof (pluginData as Record<string, unknown>).pluginPath === 'string'
+			) {
+				pluginConfigs = [pluginData as unknown as PluginConfig];
+			}
+
+			if (pluginConfigs.length > 0) {
+				console.log('[OpenClawAgentV2] Plugin sub-nodes connected', {
+					count: pluginConfigs.length,
+					plugins: pluginConfigs.map((p) => ({
+						path: p.pluginPath,
+						name: p.pluginName ?? '(unnamed)',
+					})),
+				});
+			} else {
+				console.log('[OpenClawAgentV2] No valid Plugin sub-nodes connected');
+			}
+		} catch {
+			// No plugins connected — that's fine
+			console.log('[OpenClawAgentV2] No Plugin sub-nodes connected (no AiTool input)');
 		}
 
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
@@ -944,6 +1047,40 @@ export class OpenClawAgentV2 implements INodeType {
 				}
 
 				const openClawEnv: NodeJS.ProcessEnv = {};
+
+				// Apply plugin configs — sync to openclaw.json and set env var
+				if (pluginConfigs.length > 0) {
+					const pluginPaths = pluginConfigs.map((p) => p.pluginPath).filter(Boolean);
+
+					console.log('[OpenClawAgentV2] Plugin paths to apply', {
+						itemIndex,
+						pluginCount: pluginPaths.length,
+						paths: pluginPaths,
+					});
+
+					if (pluginPaths.length > 0) {
+						try {
+							const pluginSync = syncPluginConfig({ pluginPaths });
+							console.log('[OpenClawAgentV2] Plugin config sync result', {
+								itemIndex,
+								changed: pluginSync.changed,
+								configPath: pluginSync.configPath,
+							});
+						} catch (syncError) {
+							console.log('[OpenClawAgentV2] Plugin config sync failed (non-fatal)', {
+								itemIndex,
+								error: getErrorMessage(syncError),
+							});
+						}
+
+						// Pass plugin paths via environment variable for the CLI
+						openClawEnv.OPENCLAW_PLUGIN_PATHS = pluginPaths.join(';');
+						console.log('[OpenClawAgentV2] Set OPENCLAW_PLUGIN_PATHS env var', {
+							itemIndex,
+							value: openClawEnv.OPENCLAW_PLUGIN_PATHS,
+						});
+					}
+				}
 
 				// Apply channel configs
 				const telegramChannel = channelConfigs.find((c) => c.channelType === 'telegram');
