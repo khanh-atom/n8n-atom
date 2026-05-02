@@ -480,27 +480,8 @@ function syncPluginConfig(params: {
 					path: pluginCfg.pluginPath,
 				});
 			}
-
-			// Track the plugin directory so openclaw knows where to scan
-			if (pluginCfg.pluginPath) {
-				let pluginDirs: string[];
-				if (Array.isArray(plugins.pluginDirs)) {
-					pluginDirs = (plugins.pluginDirs as unknown[]).filter(
-						(p): p is string => typeof p === 'string',
-					);
-				} else {
-					pluginDirs = [];
-				}
-				if (!pluginDirs.includes(pluginCfg.pluginPath)) {
-					pluginDirs.push(pluginCfg.pluginPath);
-					plugins.pluginDirs = pluginDirs as unknown as IDataObject[string];
-					changed = true;
-					console.log('[OpenClawAgentV2] syncPluginConfig: added pluginDir', {
-						pluginPath: pluginCfg.pluginPath,
-						totalDirs: pluginDirs.length,
-					});
-				}
-			}
+			// Note: plugin discovery paths are passed via OPENCLAW_PLUGIN_PATHS env var
+			// at execution time — pluginDirs is not a standard openclaw.json field.
 		} else if (pluginCfg.pluginSource === 'cloud' && pluginCfg.pluginId) {
 			// For cloud plugins, enable them under plugins.entries.<id>
 			const entry = ensureDataObject(entries, pluginCfg.pluginId);
@@ -513,12 +494,6 @@ function syncPluginConfig(params: {
 	}
 
 	if (changed) {
-		console.log('[OpenClawAgentV2] syncPluginConfig: writing config — plugins section preview', {
-			pluginKeys: Object.keys(plugins),
-			hasPluginDirs: 'pluginDirs' in plugins,
-			pluginDirs: plugins.pluginDirs,
-			entryKeys: Object.keys(entries),
-		});
 		mkdirSync(dirname(configPath), { recursive: true });
 		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 	}
