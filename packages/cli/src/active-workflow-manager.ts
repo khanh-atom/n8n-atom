@@ -613,6 +613,7 @@ export class ActiveWorkflowManager {
 				nodeTypes: this.nodeTypes,
 				staticData: dbWorkflow.staticData,
 				settings: dbWorkflow.settings,
+				workspace: dbWorkflow.workspace,
 			});
 
 			const validation = validateWorkflowHasTriggerLikeNode(

@@ -995,15 +995,38 @@ export class OpenClawAgentV2 implements INodeType {
 				if (pluginSource === 'local') {
 					// Read pluginDirectory — may be an expression like ={{ $workspace.__dirPath }}
 					let pluginDirectory = (params.pluginDirectory as string) || '';
-					// Try to evaluate expressions via getNodeParameter if it looks like an expression
-					if (pluginDirectory.includes('{{') || pluginDirectory.startsWith('=')) {
+
+					// If it's an expression referencing $workspace.__dirPath, resolve it manually
+					// from the workflow's workspace context (available at trigger/activation time)
+					if (
+						pluginDirectory.includes('$workspace.__dirPath') ||
+						pluginDirectory.includes('$workspace[')
+					) {
+						// Access the workflow's workspace context directly
+						// The underlying Workflow object is available through the TriggerContext
+						// cast to access the protected 'workflow' field
+						const workflowObj = (this as unknown as { workflow: { workspace?: IDataObject } })
+							.workflow;
+						const dirPath = normalizeOptionalString(workflowObj?.workspace?.__dirPath);
+						console.log('OpenClaw publish sync: resolving $workspace.__dirPath expression', {
+							rawValue: pluginDirectory,
+							workspaceAvailable: !!workflowObj?.workspace,
+							dirPath: dirPath ?? '(not set)',
+						});
+						if (dirPath) {
+							pluginDirectory = dirPath;
+						} else {
+							console.log('OpenClaw publish sync: $workspace.__dirPath is not available, skipping');
+							continue;
+						}
+					} else if (pluginDirectory.includes('{{') || pluginDirectory.startsWith('=')) {
+						// Other expressions we can't resolve at activation time
 						console.log(
-							'OpenClaw publish sync: pluginDirectory is an expression, cannot resolve at activation time',
+							'OpenClaw publish sync: pluginDirectory is an unresolvable expression, skipping',
 							{
 								rawValue: pluginDirectory,
 							},
 						);
-						// Can't resolve expressions at trigger time — skip this plugin
 						continue;
 					}
 					pluginDirectory = pluginDirectory.trim();
@@ -1264,7 +1287,7 @@ export class OpenClawAgentV2 implements INodeType {
 
 				const openClawEnv: NodeJS.ProcessEnv = {};
 
-				// Apply plugin configs — sync to openclaw.json and set env var
+				// Plugin env vars for CLI (config sync happens at publish time in trigger())
 				if (pluginConfigs.length > 0) {
 					const localPlugins = pluginConfigs.filter((p) => p.pluginSource === 'local');
 					const cloudPlugins = pluginConfigs.filter((p) => p.pluginSource === 'cloud');
@@ -1281,41 +1304,6 @@ export class OpenClawAgentV2 implements INodeType {
 								: `clawhub:${p.pluginId}`;
 						})
 						.filter((s): s is string => typeof s === 'string');
-
-					console.log('[OpenClawAgentV2] Plugin configs to apply', {
-						itemIndex,
-						localCount: localPlugins.length,
-						cloudCount: cloudPlugins.length,
-						localPaths: pluginPaths,
-						cloudSpecs,
-						manifests: localPlugins
-							.filter((p) => p.pluginManifest)
-							.map((p) => ({
-								id: p.pluginManifest?.id,
-								name: p.pluginManifest?.name,
-								version: p.pluginManifest?.version,
-							})),
-					});
-
-					// Sync all plugin configs to openclaw.json (entries + pluginDirs)
-					try {
-						const pluginSync = syncPluginConfig({ pluginConfigs });
-						console.log('[OpenClawAgentV2] Plugin config sync result', {
-							itemIndex,
-							changed: pluginSync.changed,
-							configPath: pluginSync.configPath,
-						});
-					} catch (syncError) {
-						console.log('[OpenClawAgentV2] Plugin config sync failed (non-fatal)', {
-							itemIndex,
-							error: getErrorMessage(syncError),
-						});
-					}
-					console.log('OpenClaw publish sync: plugin config sync completed', {
-						itemIndex,
-						localPaths: pluginPaths,
-						cloudSpecs,
-					});
 
 					// Pass local plugin paths via environment variable for the CLI
 					if (pluginPaths.length > 0) {
