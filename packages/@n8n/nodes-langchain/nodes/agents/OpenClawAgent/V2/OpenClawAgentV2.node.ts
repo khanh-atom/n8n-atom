@@ -513,6 +513,12 @@ function syncPluginConfig(params: {
 	}
 
 	if (changed) {
+		console.log('[OpenClawAgentV2] syncPluginConfig: writing config — plugins section preview', {
+			pluginKeys: Object.keys(plugins),
+			hasPluginDirs: 'pluginDirs' in plugins,
+			pluginDirs: plugins.pluginDirs,
+			entryKeys: Object.keys(entries),
+		});
 		mkdirSync(dirname(configPath), { recursive: true });
 		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 	}
