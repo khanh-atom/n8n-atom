@@ -455,29 +455,64 @@ function syncNineRouterModelConfig(params: {
 
 function syncPluginConfig(params: {
 	pluginConfigs: PluginConfig[];
-}): { installed: string[]; errors: string[] } {
+}): { installed: string[]; skipped: string[]; errors: string[] } {
 	const installed: string[] = [];
+	const skipped: string[] = [];
 	const errors: string[] = [];
+
+	// Read current config to check what's already installed
+	const configPath = getOpenClawConfigPath();
+	let existingInstalls: Record<string, unknown> = {};
+	if (configPath) {
+		try {
+			const config = readOpenClawConfig(configPath);
+			const plugins = config.plugins as IDataObject | undefined;
+			existingInstalls = (plugins?.installs as Record<string, unknown>) ?? {};
+		} catch {
+			// Config doesn't exist yet — all plugins need install
+		}
+	}
+
+	// Resolve the openclaw binary path (same logic as execute())
+	const resolvedBinary = resolveOpenClawBinary('openclaw');
+	const env = createOpenClawProcessEnv(resolvedBinary.pathDirectories, { NODE_NO_WARNINGS: '1' });
 
 	for (const pluginCfg of params.pluginConfigs) {
 		if (pluginCfg.pluginSource === 'local' && pluginCfg.pluginPath) {
-			// Use the CLI: openclaw plugins install -l <path>
 			const pluginPath = pluginCfg.pluginPath;
+			const manifestId = pluginCfg.pluginManifest?.id;
+
+			// Check if already installed at this path
+			if (manifestId) {
+				const existingRecord = existingInstalls[manifestId] as
+					| { source?: string; sourcePath?: string }
+					| undefined;
+				if (existingRecord?.source === 'path' && existingRecord?.sourcePath === pluginPath) {
+					console.log('[OpenClawAgentV2] syncPluginConfig: already installed, skipping', {
+						manifestId,
+						pluginPath,
+					});
+					skipped.push(manifestId);
+					continue;
+				}
+			}
+
+			// Not installed yet — run: openclaw plugins install -l <path>
 			try {
-				const cmd = `openclaw plugins install -l ${JSON.stringify(pluginPath)}`;
+				const cmd = `${resolvedBinary.binaryPath} plugins install -l ${JSON.stringify(pluginPath)}`;
 				console.log('[OpenClawAgentV2] syncPluginConfig: running CLI', { cmd });
 				const output = execSync(cmd, {
 					timeout: 30_000,
 					encoding: 'utf8',
 					stdio: ['pipe', 'pipe', 'pipe'],
-					env: { ...process.env, NODE_NO_WARNINGS: '1' },
+					env,
 				});
 				console.log('[OpenClawAgentV2] syncPluginConfig: CLI success', {
 					pluginPath,
-					manifestId: pluginCfg.pluginManifest?.id,
+					manifestId,
 					output: output.trim().slice(0, 500),
 				});
-				installed.push(pluginCfg.pluginManifest?.id ?? pluginPath);
+				installed.push(manifestId ?? pluginPath);
 			} catch (cliErr) {
 				const errMsg = cliErr instanceof Error ? cliErr.message : String(cliErr);
 				const stderr =
@@ -494,31 +529,41 @@ function syncPluginConfig(params: {
 				errors.push(`local:${pluginPath}: ${errMsg.slice(0, 200)}`);
 			}
 		} else if (pluginCfg.pluginSource === 'cloud' && pluginCfg.pluginId) {
-			// For cloud plugins, use: openclaw plugins install <pluginId>
-			const spec = pluginCfg.pluginVersion
-				? `${pluginCfg.pluginId}@${pluginCfg.pluginVersion}`
-				: pluginCfg.pluginId;
+			const pluginId = pluginCfg.pluginId;
+
+			// Check if already installed
+			const existingRecord = existingInstalls[pluginId] as { source?: string } | undefined;
+			if (existingRecord?.source === 'npm' || existingRecord?.source === 'clawhub') {
+				console.log('[OpenClawAgentV2] syncPluginConfig: already installed, skipping', {
+					pluginId,
+					source: existingRecord.source,
+				});
+				skipped.push(pluginId);
+				continue;
+			}
+
+			const spec = pluginCfg.pluginVersion ? `${pluginId}@${pluginCfg.pluginVersion}` : pluginId;
 			try {
-				const cmd = `openclaw plugins install ${JSON.stringify(spec)}`;
+				const cmd = `${resolvedBinary.binaryPath} plugins install ${JSON.stringify(spec)}`;
 				console.log('[OpenClawAgentV2] syncPluginConfig: running CLI', { cmd });
 				const output = execSync(cmd, {
 					timeout: 60_000,
 					encoding: 'utf8',
 					stdio: ['pipe', 'pipe', 'pipe'],
-					env: { ...process.env, NODE_NO_WARNINGS: '1' },
+					env,
 				});
 				console.log('[OpenClawAgentV2] syncPluginConfig: CLI success', {
-					pluginId: pluginCfg.pluginId,
+					pluginId,
 					output: output.trim().slice(0, 500),
 				});
-				installed.push(pluginCfg.pluginId);
+				installed.push(pluginId);
 			} catch (cliErr) {
 				const errMsg = cliErr instanceof Error ? cliErr.message : String(cliErr);
 				console.log('[OpenClawAgentV2] syncPluginConfig: CLI failed', {
-					pluginId: pluginCfg.pluginId,
+					pluginId,
 					error: errMsg.slice(0, 300),
 				});
-				errors.push(`cloud:${pluginCfg.pluginId}: ${errMsg.slice(0, 200)}`);
+				errors.push(`cloud:${pluginId}: ${errMsg.slice(0, 200)}`);
 			}
 		}
 	}
@@ -526,12 +571,14 @@ function syncPluginConfig(params: {
 	console.log('[OpenClawAgentV2] syncPluginConfig: result', {
 		pluginCount: params.pluginConfigs.length,
 		installedCount: installed.length,
+		skippedCount: skipped.length,
 		errorCount: errors.length,
-		installed,
+		installed: installed.length > 0 ? installed : undefined,
+		skipped: skipped.length > 0 ? skipped : undefined,
 		errors: errors.length > 0 ? errors : undefined,
 	});
 
-	return { installed, errors };
+	return { installed, skipped, errors };
 }
 
 function parseOpenClawOutput(stdout: string): IDataObject {
