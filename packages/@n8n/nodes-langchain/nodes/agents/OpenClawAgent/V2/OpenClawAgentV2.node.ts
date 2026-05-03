@@ -1066,7 +1066,7 @@ export class OpenClawAgentV2 implements INodeType {
 				},
 				{
 					type: NodeConnectionTypes.AiTool,
-					displayName: 'MCP Server',
+					displayName: 'MCP',
 					required: false,
 				},
 			],
