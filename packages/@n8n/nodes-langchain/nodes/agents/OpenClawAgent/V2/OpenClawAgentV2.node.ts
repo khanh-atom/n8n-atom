@@ -24,6 +24,7 @@ export interface ChannelConfig {
 	accountId?: string;
 	dmPolicy?: string;
 	groupPolicy?: string;
+	allowFrom?: string[];
 	phoneNumberId?: string;
 	accessToken?: string;
 	extra?: IDataObject;
@@ -280,6 +281,29 @@ function setOptionalConfigValue(target: IDataObject, key: string, value: unknown
 	return setConfigValue(target, key, value);
 }
 
+function setOptionalStringArrayConfigValue(
+	target: IDataObject,
+	key: string,
+	value: string[] | undefined,
+): boolean {
+	if (value === undefined) {
+		return deleteConfigValue(target, key);
+	}
+	if (value.length === 0) {
+		return deleteConfigValue(target, key);
+	}
+	const existing = target[key];
+	if (
+		Array.isArray(existing) &&
+		existing.length === value.length &&
+		existing.every((entry, index) => entry === value[index])
+	) {
+		return false;
+	}
+	target[key] = value as IDataObject[string];
+	return true;
+}
+
 function setDefaultConfigValue(target: IDataObject, key: string, value: unknown): boolean {
 	if (target[key] !== undefined) {
 		return false;
@@ -426,7 +450,10 @@ function syncChannelConfig(params: {
 	channelType: string;
 	botToken?: string;
 	replyAccount?: string;
-}): { accountId?: string; changed: boolean; configPath: string } {
+	dmPolicy?: string;
+	groupPolicy?: string;
+	allowFrom?: string[];
+}): { accountId?: string; changed: boolean; configPath: string; targetPath: string } {
 	const configPath = getOpenClawConfigPath();
 	if (!configPath) {
 		throw new ApplicationError(
@@ -437,28 +464,68 @@ function syncChannelConfig(params: {
 	const channels = ensureDataObject(config, 'channels');
 	const channel = ensureDataObject(channels, params.channelType);
 	const accountId = normalizeOpenClawAccountId(params.replyAccount);
+	const useAccountTarget = !!accountId && accountId !== OPENCLAW_DEFAULT_ACCOUNT_ID;
+	const target = useAccountTarget
+		? ensureDataObject(ensureDataObject(channel, 'accounts'), accountId)
+		: channel;
+	const targetPath = useAccountTarget
+		? `channels.${params.channelType}.accounts.${accountId}`
+		: `channels.${params.channelType}`;
+	const dmPolicy = normalizeOptionalString(params.dmPolicy);
+	const groupPolicy = normalizeOptionalString(params.groupPolicy);
+
+	console.log('[OpenClawAgentV2] syncChannelConfig: start', {
+		channelType: params.channelType,
+		accountId: accountId ?? OPENCLAW_DEFAULT_ACCOUNT_ID,
+		targetPath,
+		configPath,
+		hasBotToken: !!params.botToken,
+		dmPolicy: dmPolicy ?? '(openclaw-default)',
+		groupPolicy: groupPolicy ?? '(openclaw-default)',
+		allowFromCount: params.allowFrom?.length,
+	});
 
 	let changed = false;
 	changed = setConfigValue(channel, 'enabled', true) || changed;
-	changed = setDefaultConfigValue(channel, 'dmPolicy', 'pairing') || changed;
-	changed = setDefaultConfigValue(channel, 'groupPolicy', 'allowlist') || changed;
+	if (useAccountTarget) {
+		changed = setConfigValue(target, 'enabled', true) || changed;
+	}
+	changed =
+		(dmPolicy
+			? setConfigValue(target, 'dmPolicy', dmPolicy)
+			: setDefaultConfigValue(target, 'dmPolicy', 'pairing')) || changed;
+	changed =
+		(groupPolicy
+			? setConfigValue(target, 'groupPolicy', groupPolicy)
+			: setDefaultConfigValue(target, 'groupPolicy', 'allowlist')) || changed;
+	if (params.allowFrom !== undefined) {
+		changed = setOptionalStringArrayConfigValue(target, 'allowFrom', params.allowFrom) || changed;
+	}
 
 	if (params.botToken) {
-		if (accountId && accountId !== OPENCLAW_DEFAULT_ACCOUNT_ID) {
-			const accounts = ensureDataObject(channel, 'accounts');
-			const account = ensureDataObject(accounts, accountId);
-			changed = setConfigValue(account, 'enabled', true) || changed;
-			changed = setConfigValue(account, 'botToken', params.botToken) || changed;
-		} else {
-			changed = setConfigValue(channel, 'botToken', params.botToken) || changed;
-		}
+		changed = setConfigValue(target, 'botToken', params.botToken) || changed;
 	}
 
 	if (changed) {
 		mkdirSync(dirname(configPath), { recursive: true });
 		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+		console.log('[OpenClawAgentV2] syncChannelConfig: openclaw.json written', {
+			channelType: params.channelType,
+			accountId: accountId ?? OPENCLAW_DEFAULT_ACCOUNT_ID,
+			targetPath,
+			configPath,
+			allowFromCount: params.allowFrom?.length,
+		});
+	} else {
+		console.log('[OpenClawAgentV2] syncChannelConfig: no changes needed', {
+			channelType: params.channelType,
+			accountId: accountId ?? OPENCLAW_DEFAULT_ACCOUNT_ID,
+			targetPath,
+			configPath,
+			allowFromCount: params.allowFrom?.length,
+		});
 	}
-	return { accountId, changed, configPath };
+	return { accountId, changed, configPath, targetPath };
 }
 
 function getNineRouterModelDefinition(model: string): IDataObject {
@@ -1496,6 +1563,13 @@ export class OpenClawAgentV2 implements INodeType {
 			console.log('OpenClaw publish sync: resolved channel candidates', {
 				channelCount: channelConfigs.length,
 				channelTypes: channelConfigs.map((c) => c.channelType),
+				channels: channelConfigs.map((channelConfig) => ({
+					channelType: channelConfig.channelType,
+					accountId: channelConfig.accountId ?? OPENCLAW_DEFAULT_ACCOUNT_ID,
+					dmPolicy: channelConfig.dmPolicy,
+					groupPolicy: channelConfig.groupPolicy,
+					allowFromCount: channelConfig.allowFrom?.length,
+				})),
 			});
 		} catch {
 			// No channels connected — that's fine
@@ -1727,10 +1801,21 @@ export class OpenClawAgentV2 implements INodeType {
 
 				if (telegramChannel?.botToken) {
 					openClawEnv.TELEGRAM_BOT_TOKEN = telegramChannel.botToken;
-					syncChannelConfig({
+					const telegramSync = syncChannelConfig({
 						channelType: 'telegram',
 						botToken: telegramChannel.botToken,
 						replyAccount: telegramChannel.accountId,
+						dmPolicy: telegramChannel.dmPolicy,
+						groupPolicy: telegramChannel.groupPolicy,
+						allowFrom: telegramChannel.allowFrom ?? [],
+					});
+					console.log('OpenClaw publish sync: Telegram channel config synced', {
+						itemIndex,
+						changed: telegramSync.changed,
+						configPath: telegramSync.configPath,
+						targetPath: telegramSync.targetPath,
+						accountId: telegramSync.accountId ?? OPENCLAW_DEFAULT_ACCOUNT_ID,
+						allowFromCount: telegramChannel.allowFrom?.length ?? 0,
 					});
 				}
 
@@ -1741,10 +1826,17 @@ export class OpenClawAgentV2 implements INodeType {
 					if (whatsappChannel.phoneNumberId) {
 						openClawEnv.WHATSAPP_PHONE_NUMBER_ID = whatsappChannel.phoneNumberId;
 					}
-					syncChannelConfig({
+					const whatsappSync = syncChannelConfig({
 						channelType: 'whatsapp',
 						botToken: whatsappChannel.accessToken,
 						replyAccount: whatsappChannel.accountId,
+					});
+					console.log('OpenClaw publish sync: WhatsApp channel config synced', {
+						itemIndex,
+						changed: whatsappSync.changed,
+						configPath: whatsappSync.configPath,
+						targetPath: whatsappSync.targetPath,
+						accountId: whatsappSync.accountId ?? OPENCLAW_DEFAULT_ACCOUNT_ID,
 					});
 				}
 				console.log('OpenClaw publish sync: channel config sync completed', {
