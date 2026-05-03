@@ -118,6 +118,7 @@ const NINE_ROUTER_DEFAULT_BASE_URL = 'http://localhost:20128/api/v1';
 const NINE_ROUTER_API = 'openai-completions';
 const NINE_ROUTER_CONTEXT_WINDOW = 128_000;
 const NINE_ROUTER_MAX_TOKENS = 32_000;
+const OPENCLAW_TELEGRAM_CHANNEL_NODE_TYPE = '@n8n/n8n-nodes-langchain.openClawTelegramChannel';
 
 function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -140,6 +141,41 @@ function normalizeOptionalString(value: unknown): string | undefined {
 
 function normalizeLowercaseStringOrEmpty(value: string | undefined): string {
 	return (value ?? '').trim().toLowerCase();
+}
+
+function normalizeStringOrNumber(value: unknown): string | undefined {
+	if (typeof value === 'number' && Number.isFinite(value)) {
+		return String(value);
+	}
+	return normalizeOptionalString(value);
+}
+
+function normalizeTelegramAllowFromEntry(value: unknown): string | undefined {
+	const raw = normalizeStringOrNumber(value);
+	if (!raw) {
+		return undefined;
+	}
+	const normalized = raw.replace(/^(telegram|tg):/i, '').trim();
+	return normalized || undefined;
+}
+
+function normalizeAllowFromEntries(value: unknown): string[] {
+	const rawEntries = Array.isArray(value)
+		? value
+		: typeof value === 'string'
+			? value.split(/[\n,]/)
+			: [];
+	const seen = new Set<string>();
+	const entries: string[] = [];
+	for (const rawEntry of rawEntries) {
+		const entry = normalizeTelegramAllowFromEntry(rawEntry);
+		if (!entry || seen.has(entry)) {
+			continue;
+		}
+		seen.add(entry);
+		entries.push(entry);
+	}
+	return entries;
 }
 
 function getObjectKeys(value: unknown): string[] | undefined {
@@ -393,6 +429,59 @@ function normalizePositiveInteger(value: unknown): number | undefined {
 		return undefined;
 	}
 	return Math.floor(value);
+}
+
+function getActivationVariables(context: ITriggerFunctions): IDataObject {
+	const additionalData = (context as unknown as { additionalData?: { variables?: IDataObject } })
+		.additionalData;
+	return isObject(additionalData?.variables) ? additionalData.variables : {};
+}
+
+function resolveVariableExpression(value: string, variables: IDataObject): unknown | undefined {
+	const trimmed = value.trim();
+	const expression = trimmed.startsWith('=') ? trimmed.slice(1).trim() : trimmed;
+	const match = expression.match(
+		/^\{\{\s*\$vars(?:\.([A-Za-z_][A-Za-z0-9_]*)|\[['"]([^'"]+)['"]\])\s*\}\}$/,
+	);
+	if (!match) {
+		return undefined;
+	}
+	const key = match[1] ?? match[2];
+	return key ? variables[key] : undefined;
+}
+
+function resolvePublishParameterValue(value: unknown, variables: IDataObject): unknown {
+	if (typeof value !== 'string') {
+		return value;
+	}
+	const trimmed = value.trim();
+	if (!trimmed.startsWith('=') && !trimmed.startsWith('{{')) {
+		return value;
+	}
+	return resolveVariableExpression(trimmed, variables);
+}
+
+function getPublishAllowFrom(params: {
+	rawValue: unknown;
+	variables: IDataObject;
+	nodeName?: string;
+}): string[] | undefined {
+	const resolvedValue = resolvePublishParameterValue(params.rawValue, params.variables);
+	if (resolvedValue === undefined && typeof params.rawValue === 'string') {
+		console.log('OpenClaw publish sync: Telegram allowFrom expression unresolved, skipping field', {
+			nodeName: params.nodeName,
+			rawValue: params.rawValue,
+		});
+		return undefined;
+	}
+	const allowFrom = normalizeAllowFromEntries(resolvedValue);
+	console.log('OpenClaw publish sync: resolved Telegram allowFrom parameter', {
+		nodeName: params.nodeName,
+		rawType: typeof params.rawValue,
+		resolvedType: Array.isArray(resolvedValue) ? 'array' : typeof resolvedValue,
+		allowFromCount: allowFrom.length,
+	});
+	return allowFrom;
 }
 
 function getMcpServerConfigFromParameters(parameters: Record<string, unknown>): {
@@ -1336,6 +1425,11 @@ export class OpenClawAgentV2 implements INodeType {
 					connectionType: NodeConnectionTypes.AiTool,
 					depth: 1,
 				});
+				const aiChannelParents = this.getParentNodes(nodeName, {
+					includeNodeParameters: true,
+					connectionType: NodeConnectionTypes.AiChannel,
+					depth: 1,
+				});
 				console.log('OpenClaw publish sync: discovered AI tool config sub-nodes', {
 					count: aiToolParents.length,
 					nodes: aiToolParents.map((p) => ({
@@ -1344,6 +1438,62 @@ export class OpenClawAgentV2 implements INodeType {
 						params: p.parameters ? Object.keys(p.parameters) : [],
 					})),
 				});
+				console.log('OpenClaw publish sync: discovered AI channel config sub-nodes', {
+					count: aiChannelParents.length,
+					nodes: aiChannelParents.map((p) => ({
+						name: (p as unknown as { name?: string }).name,
+						type: p.type,
+						params: p.parameters ? Object.keys(p.parameters) : [],
+						hasCredentials: !!(p as unknown as { credentials?: IDataObject }).credentials,
+					})),
+				});
+
+				const activationVariables = getActivationVariables(this);
+				const publishChannelConfigs: ChannelConfig[] = [];
+				for (const channelNode of aiChannelParents) {
+					const params = channelNode.parameters ?? {};
+					const channelNodeName = (channelNode as unknown as { name?: string }).name;
+					if (channelNode.type !== OPENCLAW_TELEGRAM_CHANNEL_NODE_TYPE) {
+						console.log('OpenClaw publish sync: skipping unsupported channel sub-node', {
+							nodeName: channelNodeName,
+							type: channelNode.type,
+						});
+						continue;
+					}
+
+					const accountId =
+						normalizeOptionalString(
+							resolvePublishParameterValue(params.accountId, activationVariables),
+						) ?? undefined;
+					const dmPolicy =
+						normalizeOptionalString(
+							resolvePublishParameterValue(params.dmPolicy, activationVariables),
+						) ?? 'pairing';
+					const groupPolicy =
+						normalizeOptionalString(
+							resolvePublishParameterValue(params.groupPolicy, activationVariables),
+						) ?? 'allowlist';
+					const allowFrom = getPublishAllowFrom({
+						rawValue: params.allowFrom,
+						variables: activationVariables,
+						nodeName: channelNodeName,
+					});
+
+					publishChannelConfigs.push({
+						channelType: 'telegram',
+						accountId,
+						dmPolicy,
+						groupPolicy,
+						allowFrom,
+					});
+					console.log('OpenClaw publish sync: prepared Telegram channel config', {
+						nodeName: channelNodeName,
+						accountId: accountId ?? OPENCLAW_DEFAULT_ACCOUNT_ID,
+						dmPolicy,
+						groupPolicy,
+						allowFromCount: allowFrom?.length,
+					});
+				}
 
 				// Build PluginConfig and McpServerConfig objects from discovered sub-node parameters.
 				const publishPluginConfigs: PluginConfig[] = [];
@@ -1499,6 +1649,35 @@ export class OpenClawAgentV2 implements INodeType {
 					}
 				} else {
 					console.log('OpenClaw publish sync: no plugin configs to sync on activation');
+				}
+
+				if (publishChannelConfigs.length > 0) {
+					for (const channelConfig of publishChannelConfigs) {
+						try {
+							const syncResult = syncChannelConfig({
+								channelType: channelConfig.channelType,
+								replyAccount: channelConfig.accountId,
+								dmPolicy: channelConfig.dmPolicy,
+								groupPolicy: channelConfig.groupPolicy,
+								allowFrom: channelConfig.allowFrom,
+							});
+							console.log('OpenClaw publish sync: channel config synced on activation', {
+								channelType: channelConfig.channelType,
+								changed: syncResult.changed,
+								configPath: syncResult.configPath,
+								targetPath: syncResult.targetPath,
+								accountId: syncResult.accountId ?? OPENCLAW_DEFAULT_ACCOUNT_ID,
+								allowFromCount: channelConfig.allowFrom?.length,
+							});
+						} catch (syncErr) {
+							console.log('OpenClaw publish sync: channel config sync failed on activation', {
+								channelType: channelConfig.channelType,
+								error: getErrorMessage(syncErr),
+							});
+						}
+					}
+				} else {
+					console.log('OpenClaw publish sync: no channel configs to sync on activation');
 				}
 
 				if (publishMcpServerConfigs.length > 0) {
