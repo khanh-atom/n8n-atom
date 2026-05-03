@@ -340,6 +340,10 @@ function getTelegramAllowFromPaths(credentialsDir: string, accountId: string): s
 	return [accountPath];
 }
 
+function getTelegramAllowFromWritePath(credentialsDir: string, accountId: string): string {
+	return join(credentialsDir, `telegram-${safeFilenameKey(accountId)}-allowFrom.json`);
+}
+
 function readOpenClawStateJsonFile(filePath: string): unknown | undefined {
 	try {
 		if (!existsSync(filePath) || !statSync(filePath).isFile()) {
@@ -434,6 +438,51 @@ function getFallbackTelegramAllowFrom(accountId: string): {
 		pairingCount,
 		allowFromFileCount,
 	};
+}
+
+function writeTelegramAllowFromStore(
+	accountId: string,
+	allowFrom: string[],
+): {
+	changed: boolean;
+	filePath?: string;
+} {
+	const credentialsDir = resolveOpenClawCredentialsDir();
+	if (!credentialsDir) {
+		console.log(
+			'[OpenClawAgentV2] Telegram allowFrom store sync skipped: credentials dir unknown',
+			{
+				accountId,
+				allowFromCount: allowFrom.length,
+			},
+		);
+		return { changed: false };
+	}
+
+	const filePath = getTelegramAllowFromWritePath(credentialsDir, accountId);
+	const existingStore = readOpenClawStateJsonFile(filePath);
+	const nextStore: IDataObject = isObject(existingStore)
+		? { ...existingStore, version: 1, allowFrom }
+		: { version: 1, allowFrom };
+	const existingJson = isObject(existingStore) ? JSON.stringify(existingStore, null, 2) : undefined;
+	const nextJson = JSON.stringify(nextStore, null, 2);
+	if (existingJson === nextJson) {
+		console.log('[OpenClawAgentV2] Telegram allowFrom store already current', {
+			accountId,
+			filePath,
+			allowFromCount: allowFrom.length,
+		});
+		return { changed: false, filePath };
+	}
+
+	mkdirSync(dirname(filePath), { recursive: true });
+	writeFileSync(filePath, `${nextJson}\n`, 'utf8');
+	console.log('[OpenClawAgentV2] Telegram allowFrom store written', {
+		accountId,
+		filePath,
+		allowFromCount: allowFrom.length,
+	});
+	return { changed: true, filePath };
 }
 
 function ensureDataObject(parent: IDataObject, key: string): IDataObject {
@@ -744,7 +793,13 @@ function syncChannelConfig(params: {
 	dmPolicy?: string;
 	groupPolicy?: string;
 	allowFrom?: string[];
-}): { accountId?: string; changed: boolean; configPath: string; targetPath: string } {
+}): {
+	accountId?: string;
+	changed: boolean;
+	configPath: string;
+	targetPath: string;
+	allowFromStorePath?: string;
+} {
 	const configPath = getOpenClawConfigPath();
 	if (!configPath) {
 		throw new ApplicationError(
@@ -752,6 +807,7 @@ function syncChannelConfig(params: {
 		);
 	}
 	const config = readOpenClawConfig(configPath);
+	const originalConfigJson = JSON.stringify(config);
 	const channels = ensureDataObject(config, 'channels');
 	const channel = ensureDataObject(channels, params.channelType);
 	const accountId = normalizeOpenClawAccountId(params.replyAccount);
@@ -764,6 +820,7 @@ function syncChannelConfig(params: {
 		: `channels.${params.channelType}`;
 	const dmPolicy = normalizeOptionalString(params.dmPolicy);
 	const groupPolicy = normalizeOptionalString(params.groupPolicy);
+	const isTelegramChannel = params.channelType === 'telegram';
 
 	console.log('[OpenClawAgentV2] syncChannelConfig: start', {
 		channelType: params.channelType,
@@ -789,15 +846,29 @@ function syncChannelConfig(params: {
 		(groupPolicy
 			? setConfigValue(target, 'groupPolicy', groupPolicy)
 			: setDefaultConfigValue(target, 'groupPolicy', 'allowlist')) || changed;
+	let allowFromStorePath: string | undefined;
 	if (params.allowFrom !== undefined) {
-		changed = setOptionalStringArrayConfigValue(target, 'allowFrom', params.allowFrom) || changed;
+		if (isTelegramChannel) {
+			const allowFromStoreSync = writeTelegramAllowFromStore(
+				accountId ?? OPENCLAW_DEFAULT_ACCOUNT_ID,
+				params.allowFrom,
+			);
+			allowFromStorePath = allowFromStoreSync.filePath;
+			changed = allowFromStoreSync.changed || changed;
+		} else {
+			changed = setOptionalStringArrayConfigValue(target, 'allowFrom', params.allowFrom) || changed;
+		}
+	}
+	if (isTelegramChannel) {
+		changed = deleteConfigValue(target, 'allowFrom') || changed;
 	}
 
 	if (params.botToken) {
 		changed = setConfigValue(target, 'botToken', params.botToken) || changed;
 	}
 
-	if (changed) {
+	const configChanged = JSON.stringify(config) !== originalConfigJson;
+	if (configChanged) {
 		mkdirSync(dirname(configPath), { recursive: true });
 		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 		console.log('[OpenClawAgentV2] syncChannelConfig: openclaw.json written', {
@@ -806,6 +877,16 @@ function syncChannelConfig(params: {
 			targetPath,
 			configPath,
 			allowFromCount: params.allowFrom?.length,
+			allowFromStorePath,
+		});
+	} else if (changed) {
+		console.log('[OpenClawAgentV2] syncChannelConfig: external channel store updated', {
+			channelType: params.channelType,
+			accountId: accountId ?? OPENCLAW_DEFAULT_ACCOUNT_ID,
+			targetPath,
+			configPath,
+			allowFromCount: params.allowFrom?.length,
+			allowFromStorePath,
 		});
 	} else {
 		console.log('[OpenClawAgentV2] syncChannelConfig: no changes needed', {
@@ -814,9 +895,10 @@ function syncChannelConfig(params: {
 			targetPath,
 			configPath,
 			allowFromCount: params.allowFrom?.length,
+			allowFromStorePath,
 		});
 	}
-	return { accountId, changed, configPath, targetPath };
+	return { accountId, changed, configPath, targetPath, allowFromStorePath };
 }
 
 function getNineRouterModelDefinition(model: string): IDataObject {
@@ -1871,6 +1953,7 @@ export class OpenClawAgentV2 implements INodeType {
 								targetPath: syncResult.targetPath,
 								accountId: syncResult.accountId ?? OPENCLAW_DEFAULT_ACCOUNT_ID,
 								allowFromCount: channelConfig.allowFrom?.length,
+								allowFromStorePath: syncResult.allowFromStorePath,
 							});
 						} catch (syncErr) {
 							console.log('OpenClaw publish sync: channel config sync failed on activation', {
@@ -2198,6 +2281,7 @@ export class OpenClawAgentV2 implements INodeType {
 						targetPath: telegramSync.targetPath,
 						accountId: telegramSync.accountId ?? OPENCLAW_DEFAULT_ACCOUNT_ID,
 						allowFromCount: telegramChannel.allowFrom?.length ?? 0,
+						allowFromStorePath: telegramSync.allowFromStorePath,
 					});
 				}
 
