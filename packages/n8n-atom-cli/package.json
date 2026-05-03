@@ -1,6 +1,6 @@
 {
   "name": "n8n-atom-cli",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "description": "Lightweight CLI to expose n8n workflow files as MCP (Model Context Protocol) servers",
   "type": "module",
   "bin": {
