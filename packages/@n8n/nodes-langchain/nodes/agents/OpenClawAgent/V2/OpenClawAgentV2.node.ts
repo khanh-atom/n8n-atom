@@ -106,6 +106,8 @@ const selectorTypeToCliFlag: Record<Exclude<SelectorType, 'default'>, string> = 
 const DEFAULT_TIMEOUT_SECONDS = 300;
 const CLI_SHUTDOWN_GRACE_SECONDS = 90;
 const OPENCLAW_CONFIG_PATH_ENV = 'OPENCLAW_CONFIG_PATH';
+const OPENCLAW_STATE_DIR_ENV = 'OPENCLAW_STATE_DIR';
+const OPENCLAW_OAUTH_DIR_ENV = 'OPENCLAW_OAUTH_DIR';
 const OPENCLAW_DEFAULT_ACCOUNT_ID = 'default';
 const OPEN_CODE_FREE_MODEL_SOURCE = 'opencode-free';
 const OPEN_CODE_FREE_PROVIDER = 'opencode';
@@ -176,6 +178,22 @@ function normalizeAllowFromEntries(value: unknown): string[] {
 		entries.push(entry);
 	}
 	return entries;
+}
+
+function getPublishLiteralExpressionValue(value: string): string | undefined {
+	const trimmed = value.trim();
+	if (!trimmed.startsWith('=')) {
+		return undefined;
+	}
+	const expression = trimmed.slice(1).trim();
+	if (!expression || expression.startsWith('{{') || expression.includes('$')) {
+		return undefined;
+	}
+	const quotedMatch = expression.match(/^(['"])(.*)\1$/);
+	if (quotedMatch) {
+		return quotedMatch[2];
+	}
+	return expression;
 }
 
 function getObjectKeys(value: unknown): string[] | undefined {
@@ -282,6 +300,140 @@ function getOpenClawConfigPath(): string | undefined {
 	}
 	const home = getHomeDirectory();
 	return home ? join(home, '.openclaw', 'openclaw.json') : undefined;
+}
+
+function resolveOpenClawStateDir(): string | undefined {
+	const stateDir = normalizeOptionalString(process.env[OPENCLAW_STATE_DIR_ENV]);
+	if (stateDir) {
+		return stateDir;
+	}
+	const home = getHomeDirectory();
+	return home ? join(home, '.openclaw') : undefined;
+}
+
+function resolveOpenClawCredentialsDir(): string | undefined {
+	const oauthDir = normalizeOptionalString(process.env[OPENCLAW_OAUTH_DIR_ENV]);
+	if (oauthDir) {
+		return oauthDir;
+	}
+	const stateDir = resolveOpenClawStateDir();
+	return stateDir ? join(stateDir, 'credentials') : undefined;
+}
+
+function safeFilenameKey(value: string): string {
+	return value
+		.trim()
+		.toLowerCase()
+		.replace(/[\\/:*?"<>|]/g, '_')
+		.replace(/\.\./g, '_');
+}
+
+function getTelegramPairingPath(credentialsDir: string): string {
+	return join(credentialsDir, 'telegram-pairing.json');
+}
+
+function getTelegramAllowFromPaths(credentialsDir: string, accountId: string): string[] {
+	const accountPath = join(credentialsDir, `telegram-${safeFilenameKey(accountId)}-allowFrom.json`);
+	if (accountId === OPENCLAW_DEFAULT_ACCOUNT_ID) {
+		return [accountPath, join(credentialsDir, 'telegram-allowFrom.json')];
+	}
+	return [accountPath];
+}
+
+function readOpenClawStateJsonFile(filePath: string): unknown | undefined {
+	try {
+		if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+			return undefined;
+		}
+		return jsonParse<unknown>(readFileSync(filePath, 'utf8'), {
+			acceptJSObject: true,
+			repairJSON: true,
+		});
+	} catch (error) {
+		console.log('[OpenClawAgentV2] Failed to read Telegram allowFrom source file', {
+			filePath,
+			error: getErrorMessage(error),
+		});
+		return undefined;
+	}
+}
+
+function getMetaString(meta: unknown, key: string): string | undefined {
+	return isObject(meta) ? normalizeOptionalString(meta[key]) : undefined;
+}
+
+function addTelegramAllowFromEntry(entries: string[], seen: Set<string>, value: unknown): void {
+	const entry = normalizeTelegramAllowFromEntry(value);
+	if (!entry || seen.has(entry)) {
+		return;
+	}
+	seen.add(entry);
+	entries.push(entry);
+}
+
+function getFallbackTelegramAllowFrom(accountId: string): {
+	allowFrom: string[];
+	credentialsDir?: string;
+	pairingPath?: string;
+	allowFromPaths?: string[];
+	pairingCount: number;
+	allowFromFileCount: number;
+} {
+	const credentialsDir = resolveOpenClawCredentialsDir();
+	if (!credentialsDir) {
+		return { allowFrom: [], pairingCount: 0, allowFromFileCount: 0 };
+	}
+
+	const pairingPath = getTelegramPairingPath(credentialsDir);
+	const allowFromPaths = getTelegramAllowFromPaths(credentialsDir, accountId);
+	const entries: string[] = [];
+	const seen = new Set<string>();
+	let pairingCount = 0;
+	let allowFromFileCount = 0;
+
+	const pairingStore = readOpenClawStateJsonFile(pairingPath);
+	const requests =
+		isObject(pairingStore) && Array.isArray(pairingStore.requests) ? pairingStore.requests : [];
+	for (const request of requests) {
+		if (!isObject(request)) {
+			continue;
+		}
+		const requestAccountId =
+			normalizeOpenClawAccountId(getMetaString(request.meta, 'accountId')) ??
+			OPENCLAW_DEFAULT_ACCOUNT_ID;
+		if (requestAccountId !== accountId) {
+			continue;
+		}
+		const beforeCount = entries.length;
+		addTelegramAllowFromEntry(entries, seen, request.id);
+		if (entries.length > beforeCount) {
+			pairingCount++;
+		}
+	}
+
+	for (const allowFromPath of allowFromPaths) {
+		const allowFromStore = readOpenClawStateJsonFile(allowFromPath);
+		const allowFromEntries =
+			isObject(allowFromStore) && Array.isArray(allowFromStore.allowFrom)
+				? allowFromStore.allowFrom
+				: [];
+		for (const entry of allowFromEntries) {
+			const beforeCount = entries.length;
+			addTelegramAllowFromEntry(entries, seen, entry);
+			if (entries.length > beforeCount) {
+				allowFromFileCount++;
+			}
+		}
+	}
+
+	return {
+		allowFrom: entries,
+		credentialsDir,
+		pairingPath,
+		allowFromPaths,
+		pairingCount,
+		allowFromFileCount,
+	};
 }
 
 function ensureDataObject(parent: IDataObject, key: string): IDataObject {
@@ -465,13 +617,63 @@ function getPublishAllowFrom(params: {
 	rawValue: unknown;
 	variables: IDataObject;
 	nodeName?: string;
+	accountId?: string;
 }): string[] | undefined {
 	const resolvedValue = resolvePublishParameterValue(params.rawValue, params.variables);
 	if (resolvedValue === undefined && typeof params.rawValue === 'string') {
+		const literalValue = getPublishLiteralExpressionValue(params.rawValue);
+		if (literalValue !== undefined) {
+			const literalAllowFrom = normalizeAllowFromEntries(literalValue);
+			console.log('OpenClaw publish sync: resolved Telegram allowFrom literal expression', {
+				nodeName: params.nodeName,
+				rawValue: params.rawValue,
+				allowFromCount: literalAllowFrom.length,
+			});
+			return literalAllowFrom;
+		}
+
+		const accountId = params.accountId ?? OPENCLAW_DEFAULT_ACCOUNT_ID;
+		const fallback = getFallbackTelegramAllowFrom(accountId);
+		if (fallback.allowFrom.length > 0) {
+			console.log('OpenClaw publish sync: using Telegram allowFrom fallback from OpenClaw state', {
+				nodeName: params.nodeName,
+				accountId,
+				credentialsDir: fallback.credentialsDir,
+				pairingPath: fallback.pairingPath,
+				allowFromPaths: fallback.allowFromPaths,
+				pairingCount: fallback.pairingCount,
+				allowFromFileCount: fallback.allowFromFileCount,
+				allowFromCount: fallback.allowFrom.length,
+			});
+			return fallback.allowFrom;
+		}
+
 		console.log('OpenClaw publish sync: Telegram allowFrom expression unresolved, skipping field', {
 			nodeName: params.nodeName,
 			rawValue: params.rawValue,
+			accountId,
+			credentialsDir: fallback.credentialsDir,
+			pairingPath: fallback.pairingPath,
+			allowFromPaths: fallback.allowFromPaths,
 		});
+		return undefined;
+	}
+	if (resolvedValue === undefined) {
+		const accountId = params.accountId ?? OPENCLAW_DEFAULT_ACCOUNT_ID;
+		const fallback = getFallbackTelegramAllowFrom(accountId);
+		if (fallback.allowFrom.length > 0) {
+			console.log('OpenClaw publish sync: using Telegram allowFrom fallback from OpenClaw state', {
+				nodeName: params.nodeName,
+				accountId,
+				credentialsDir: fallback.credentialsDir,
+				pairingPath: fallback.pairingPath,
+				allowFromPaths: fallback.allowFromPaths,
+				pairingCount: fallback.pairingCount,
+				allowFromFileCount: fallback.allowFromFileCount,
+				allowFromCount: fallback.allowFrom.length,
+			});
+			return fallback.allowFrom;
+		}
 		return undefined;
 	}
 	const allowFrom = normalizeAllowFromEntries(resolvedValue);
@@ -1477,6 +1679,7 @@ export class OpenClawAgentV2 implements INodeType {
 						rawValue: params.allowFrom,
 						variables: activationVariables,
 						nodeName: channelNodeName,
+						accountId: accountId ?? OPENCLAW_DEFAULT_ACCOUNT_ID,
 					});
 
 					publishChannelConfigs.push({
