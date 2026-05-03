@@ -65,6 +65,16 @@ export interface PluginConfig {
 	extra?: IDataObject;
 }
 
+export interface McpServerConfig {
+	mcpServerSource: 'openclaw';
+	serverName: string;
+	url: string;
+	transport?: 'sse' | 'streamable-http';
+	headers?: Record<string, string | number | boolean>;
+	connectionTimeoutMs?: number;
+	extra?: IDataObject;
+}
+
 interface OpenClawProcessResult {
 	stdout: string;
 	stderr: string;
@@ -255,6 +265,21 @@ function setConfigValue(target: IDataObject, key: string, value: unknown): boole
 	return true;
 }
 
+function deleteConfigValue(target: IDataObject, key: string): boolean {
+	if (target[key] === undefined) {
+		return false;
+	}
+	delete target[key];
+	return true;
+}
+
+function setOptionalConfigValue(target: IDataObject, key: string, value: unknown): boolean {
+	if (value === undefined) {
+		return deleteConfigValue(target, key);
+	}
+	return setConfigValue(target, key, value);
+}
+
 function setDefaultConfigValue(target: IDataObject, key: string, value: unknown): boolean {
 	if (target[key] !== undefined) {
 		return false;
@@ -277,6 +302,109 @@ function normalizeOpenClawAccountId(value: string | undefined): string | undefin
 		return undefined;
 	}
 	return normalized;
+}
+
+function normalizeOpenClawMcpServerName(value: string | undefined): string | undefined {
+	const trimmed = normalizeOptionalString(value);
+	if (!trimmed) {
+		return undefined;
+	}
+	const normalized = trimmed
+		.replace(/[^A-Za-z0-9_-]+/g, '-')
+		.replace(/^-+/, '')
+		.replace(/-+$/, '')
+		.slice(0, 80);
+	if (!normalized || ['__proto__', 'constructor', 'prototype'].includes(normalized)) {
+		return undefined;
+	}
+	return normalized;
+}
+
+function isHttpUrl(value: string): boolean {
+	try {
+		const parsed = new URL(value);
+		return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+	} catch {
+		return false;
+	}
+}
+
+function normalizeMcpTransport(value: unknown): McpServerConfig['transport'] | undefined {
+	if (value === 'sse' || value === 'streamable-http') {
+		return value;
+	}
+	if (value === 'http') {
+		return 'streamable-http';
+	}
+	return undefined;
+}
+
+function normalizeMcpHeaders(
+	value: unknown,
+): Record<string, string | number | boolean> | undefined {
+	let rawHeaders: unknown = value;
+	if (typeof value === 'string') {
+		const trimmed = value.trim();
+		if (!trimmed || trimmed === '{}') {
+			return undefined;
+		}
+		rawHeaders = jsonParse<unknown>(trimmed, { acceptJSObject: true, repairJSON: true });
+	}
+	if (!isObject(rawHeaders)) {
+		return undefined;
+	}
+	const headers = Object.fromEntries(
+		Object.entries(rawHeaders).filter(
+			(entry): entry is [string, string | number | boolean] =>
+				typeof entry[1] === 'string' ||
+				typeof entry[1] === 'number' ||
+				typeof entry[1] === 'boolean',
+		),
+	);
+	return Object.keys(headers).length > 0 ? headers : undefined;
+}
+
+function normalizePositiveInteger(value: unknown): number | undefined {
+	if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+		return undefined;
+	}
+	return Math.floor(value);
+}
+
+function getMcpServerConfigFromParameters(parameters: Record<string, unknown>): {
+	config?: McpServerConfig;
+	reason?: string;
+} {
+	const serverName = normalizeOptionalString(parameters.serverName);
+	const url = normalizeOptionalString(parameters.endpointUrl);
+	if (!serverName && !url) {
+		return { reason: 'not-mcp-server-node' };
+	}
+	if (!serverName) {
+		return { reason: 'missing-server-name' };
+	}
+	if (!url) {
+		return { reason: 'missing-endpoint-url' };
+	}
+
+	const options = isObject(parameters.options) ? parameters.options : {};
+	let headers: McpServerConfig['headers'];
+	try {
+		headers = normalizeMcpHeaders(options.headers);
+	} catch (error) {
+		return { reason: `invalid-headers:${getErrorMessage(error)}` };
+	}
+
+	return {
+		config: {
+			mcpServerSource: 'openclaw',
+			serverName,
+			url,
+			transport: normalizeMcpTransport(parameters.transport),
+			headers,
+			connectionTimeoutMs: normalizePositiveInteger(options.connectionTimeoutMs),
+		},
+	};
 }
 
 function readOpenClawConfig(configPath: string): IDataObject {
@@ -453,6 +581,111 @@ function syncNineRouterModelConfig(params: {
 	};
 }
 
+function syncMcpServerConfig(params: { mcpServerConfigs: McpServerConfig[] }): {
+	changed: boolean;
+	configPath?: string;
+	synced: string[];
+	skipped: string[];
+} {
+	const synced: string[] = [];
+	const skipped: string[] = [];
+	if (params.mcpServerConfigs.length === 0) {
+		return { changed: false, synced, skipped };
+	}
+
+	const configPath = getOpenClawConfigPath();
+	if (!configPath) {
+		const reason = `Could not determine OpenClaw config path. Set ${OPENCLAW_CONFIG_PATH_ENV} or HOME for the n8n process.`;
+		console.log('[OpenClawAgentV2] syncMcpServerConfig: skipped all servers', {
+			reason,
+			serverCount: params.mcpServerConfigs.length,
+		});
+		return { changed: false, synced, skipped: [reason] };
+	}
+
+	console.log('[OpenClawAgentV2] syncMcpServerConfig: start', {
+		configPath,
+		serverCount: params.mcpServerConfigs.length,
+		serverNames: params.mcpServerConfigs.map((server) => server.serverName),
+	});
+
+	const config = readOpenClawConfig(configPath);
+	const mcp = ensureDataObject(config, 'mcp');
+	const servers = ensureDataObject(mcp, 'servers');
+
+	let changed = false;
+	for (const serverConfig of params.mcpServerConfigs) {
+		const serverName = normalizeOpenClawMcpServerName(serverConfig.serverName);
+		const url = normalizeOptionalString(serverConfig.url);
+		if (!serverName) {
+			const reason = `invalid-name:${serverConfig.serverName}`;
+			console.log('[OpenClawAgentV2] syncMcpServerConfig: skipping server', {
+				rawServerName: serverConfig.serverName,
+				reason,
+			});
+			skipped.push(reason);
+			continue;
+		}
+		if (!url || !isHttpUrl(url)) {
+			const reason = `invalid-url:${serverName}`;
+			console.log('[OpenClawAgentV2] syncMcpServerConfig: skipping server', {
+				serverName,
+				hasUrl: !!url,
+				reason,
+			});
+			skipped.push(reason);
+			continue;
+		}
+
+		const server = ensureDataObject(servers, serverName);
+		const transport = normalizeMcpTransport(serverConfig.transport);
+		const headers =
+			serverConfig.headers && Object.keys(serverConfig.headers).length > 0
+				? serverConfig.headers
+				: undefined;
+		const connectionTimeoutMs = normalizePositiveInteger(serverConfig.connectionTimeoutMs);
+
+		changed = setConfigValue(server, 'url', url) || changed;
+		changed = setOptionalConfigValue(server, 'transport', transport) || changed;
+		changed = setOptionalConfigValue(server, 'headers', headers) || changed;
+		changed = setOptionalConfigValue(server, 'connectionTimeoutMs', connectionTimeoutMs) || changed;
+
+		changed = deleteConfigValue(server, 'command') || changed;
+		changed = deleteConfigValue(server, 'args') || changed;
+		changed = deleteConfigValue(server, 'env') || changed;
+		changed = deleteConfigValue(server, 'cwd') || changed;
+		changed = deleteConfigValue(server, 'workingDirectory') || changed;
+
+		console.log('[OpenClawAgentV2] syncMcpServerConfig: prepared server', {
+			serverName,
+			rawServerName: serverConfig.serverName,
+			url,
+			transport: transport ?? '(openclaw-default)',
+			headerKeys: headers ? Object.keys(headers) : [],
+			connectionTimeoutMs,
+		});
+		synced.push(serverName);
+	}
+
+	if (changed) {
+		mkdirSync(dirname(configPath), { recursive: true });
+		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+		console.log('[OpenClawAgentV2] syncMcpServerConfig: openclaw.json written', {
+			configPath,
+			synced,
+			skipped,
+		});
+	} else {
+		console.log('[OpenClawAgentV2] syncMcpServerConfig: no changes needed', {
+			configPath,
+			synced,
+			skipped,
+		});
+	}
+
+	return { changed, configPath, synced, skipped };
+}
+
 function syncPluginConfig(params: {
 	pluginConfigs: PluginConfig[];
 }): { installed: string[]; skipped: string[]; errors: string[] } {
@@ -463,11 +696,15 @@ function syncPluginConfig(params: {
 	// Read current config to check what's already installed
 	const configPath = getOpenClawConfigPath();
 	let existingInstalls: Record<string, unknown> = {};
+	let existingLoadPaths: string[] = [];
+	let existingEntries: Record<string, unknown> = {};
 	if (configPath) {
 		try {
 			const config = readOpenClawConfig(configPath);
 			const plugins = config.plugins as IDataObject | undefined;
 			existingInstalls = (plugins?.installs as Record<string, unknown>) ?? {};
+			existingLoadPaths = ((plugins?.load as IDataObject)?.paths as string[]) ?? [];
+			existingEntries = (plugins?.entries as Record<string, unknown>) ?? {};
 		} catch {
 			// Config doesn't exist yet — all plugins need install
 		}
@@ -484,10 +721,10 @@ function syncPluginConfig(params: {
 
 			// Check if already installed at this path
 			if (manifestId) {
-				const existingRecord = existingInstalls[manifestId] as
-					| { source?: string; sourcePath?: string }
-					| undefined;
-				if (existingRecord?.source === 'path' && existingRecord?.sourcePath === pluginPath) {
+				const isPathLoaded = existingLoadPaths.includes(pluginPath);
+				const isEntryEnabled = (existingEntries[manifestId] as IDataObject)?.enabled === true;
+
+				if (isPathLoaded && isEntryEnabled) {
 					console.log('[OpenClawAgentV2] syncPluginConfig: already installed, skipping', {
 						manifestId,
 						pluginPath,
@@ -827,6 +1064,11 @@ export class OpenClawAgentV2 implements INodeType {
 					displayName: 'Plugin',
 					required: false,
 				},
+				{
+					type: NodeConnectionTypes.AiTool,
+					displayName: 'MCP Server',
+					required: false,
+				},
 			],
 			outputs: [NodeConnectionTypes.Main],
 			// No hardcoded credentials — channels provide their own
@@ -1021,25 +1263,50 @@ export class OpenClawAgentV2 implements INodeType {
 			try {
 				const nodeName = node.name;
 
-				// Find plugin sub-nodes connected via AiTool
-				const pluginParents = this.getParentNodes(nodeName, {
+				// Find OpenClaw config sub-nodes connected via AiTool.
+				const aiToolParents = this.getParentNodes(nodeName, {
 					includeNodeParameters: true,
 					connectionType: NodeConnectionTypes.AiTool,
 					depth: 1,
 				});
-				console.log('OpenClaw publish sync: discovered plugin sub-nodes', {
-					count: pluginParents.length,
-					nodes: pluginParents.map((p) => ({
+				console.log('OpenClaw publish sync: discovered AI tool config sub-nodes', {
+					count: aiToolParents.length,
+					nodes: aiToolParents.map((p) => ({
 						name: (p as unknown as { name?: string }).name,
 						type: p.type,
 						params: p.parameters ? Object.keys(p.parameters) : [],
 					})),
 				});
 
-				// Build PluginConfig objects from discovered plugin sub-node parameters
+				// Build PluginConfig and McpServerConfig objects from discovered sub-node parameters.
 				const publishPluginConfigs: PluginConfig[] = [];
-				for (const pluginNode of pluginParents) {
+				const publishMcpServerConfigs: McpServerConfig[] = [];
+				for (const pluginNode of aiToolParents) {
 					const params = pluginNode.parameters ?? {};
+					const mcpServerConfig = getMcpServerConfigFromParameters(
+						params as Record<string, unknown>,
+					);
+					if (mcpServerConfig.config) {
+						console.log('OpenClaw publish sync: processing MCP Server sub-node', {
+							type: pluginNode.type,
+							serverName: mcpServerConfig.config.serverName,
+							url: mcpServerConfig.config.url,
+							transport: mcpServerConfig.config.transport ?? '(openclaw-default)',
+							headerKeys: mcpServerConfig.config.headers
+								? Object.keys(mcpServerConfig.config.headers)
+								: [],
+						});
+						publishMcpServerConfigs.push(mcpServerConfig.config);
+						continue;
+					} else if (mcpServerConfig.reason !== 'not-mcp-server-node') {
+						console.log('OpenClaw publish sync: skipping MCP Server sub-node', {
+							type: pluginNode.type,
+							reason: mcpServerConfig.reason,
+							params: JSON.stringify(params).slice(0, 300),
+						});
+						continue;
+					}
+
 					const pluginSource = (params.pluginSource as string) || 'local';
 
 					console.log('OpenClaw publish sync: processing plugin sub-node', {
@@ -1166,6 +1433,27 @@ export class OpenClawAgentV2 implements INodeType {
 				} else {
 					console.log('OpenClaw publish sync: no plugin configs to sync on activation');
 				}
+
+				if (publishMcpServerConfigs.length > 0) {
+					try {
+						const syncResult = syncMcpServerConfig({
+							mcpServerConfigs: publishMcpServerConfigs,
+						});
+						console.log('OpenClaw publish sync: MCP Server config synced on activation', {
+							changed: syncResult.changed,
+							configPath: syncResult.configPath,
+							synced: syncResult.synced,
+							skipped: syncResult.skipped.length > 0 ? syncResult.skipped : undefined,
+							serverCount: publishMcpServerConfigs.length,
+						});
+					} catch (syncErr) {
+						console.log('OpenClaw publish sync: MCP Server config sync failed on activation', {
+							error: getErrorMessage(syncErr),
+						});
+					}
+				} else {
+					console.log('OpenClaw publish sync: no MCP Server configs to sync on activation');
+				}
 			} catch (publishErr) {
 				console.log('OpenClaw publish sync: activation-time config sync failed (non-fatal)', {
 					error: getErrorMessage(publishErr),
@@ -1282,10 +1570,11 @@ export class OpenClawAgentV2 implements INodeType {
 
 		// Retrieve plugin configs from connected Plugin sub-nodes
 		let pluginConfigs: PluginConfig[] = [];
-		console.log('[OpenClawAgentV2] About to retrieve Plugin sub-node data via AiTool connection');
+		let mcpServerConfigs: McpServerConfig[] = [];
+		console.log('[OpenClawAgentV2] About to retrieve OpenClaw AiTool sub-node data');
 		try {
 			const pluginData = await this.getInputConnectionData(NodeConnectionTypes.AiTool, 0);
-			console.log('[OpenClawAgentV2] Raw plugin data from getInputConnectionData', {
+			console.log('[OpenClawAgentV2] Raw AiTool data from getInputConnectionData', {
 				type: typeof pluginData,
 				isNull: pluginData === null,
 				isUndefined: pluginData === undefined,
@@ -1296,11 +1585,19 @@ export class OpenClawAgentV2 implements INodeType {
 
 			const isPluginConfig = (item: unknown): item is PluginConfig =>
 				isObject(item) && typeof (item as Record<string, unknown>).pluginSource === 'string';
+			const isMcpServerConfig = (item: unknown): item is McpServerConfig =>
+				isObject(item) &&
+				(item as Record<string, unknown>).mcpServerSource === 'openclaw' &&
+				typeof (item as Record<string, unknown>).serverName === 'string' &&
+				typeof (item as Record<string, unknown>).url === 'string';
 
 			if (Array.isArray(pluginData)) {
 				pluginConfigs = pluginData.filter(isPluginConfig);
+				mcpServerConfigs = pluginData.filter(isMcpServerConfig);
 			} else if (pluginData && isPluginConfig(pluginData)) {
 				pluginConfigs = [pluginData];
+			} else if (pluginData && isMcpServerConfig(pluginData)) {
+				mcpServerConfigs = [pluginData];
 			}
 
 			if (pluginConfigs.length > 0) {
@@ -1318,9 +1615,24 @@ export class OpenClawAgentV2 implements INodeType {
 			} else {
 				console.log('[OpenClawAgentV2] No valid Plugin sub-nodes connected');
 			}
+
+			if (mcpServerConfigs.length > 0) {
+				console.log('[OpenClawAgentV2] MCP Server sub-nodes connected', {
+					count: mcpServerConfigs.length,
+					servers: mcpServerConfigs.map((server) => ({
+						serverName: server.serverName,
+						url: server.url,
+						transport: server.transport ?? '(openclaw-default)',
+						headerKeys: server.headers ? Object.keys(server.headers) : [],
+						connectionTimeoutMs: server.connectionTimeoutMs,
+					})),
+				});
+			} else {
+				console.log('[OpenClawAgentV2] No valid MCP Server sub-nodes connected');
+			}
 		} catch (pluginErr) {
 			// Log the actual error — this is critical for troubleshooting
-			console.log('[OpenClawAgentV2] Plugin sub-node connection FAILED', {
+			console.log('[OpenClawAgentV2] OpenClaw AiTool sub-node connection FAILED', {
 				errorType: pluginErr instanceof Error ? pluginErr.constructor.name : typeof pluginErr,
 				errorMessage: pluginErr instanceof Error ? pluginErr.message : String(pluginErr),
 				errorStack:
@@ -1328,7 +1640,9 @@ export class OpenClawAgentV2 implements INodeType {
 						? pluginErr.stack?.split('\n').slice(0, 5).join('\n')
 						: undefined,
 			});
-			console.log('[OpenClawAgentV2] No Plugin sub-nodes connected (AiTool input error)');
+			console.log(
+				'[OpenClawAgentV2] No Plugin or MCP Server sub-nodes connected (AiTool input error)',
+			);
 		}
 		console.log('OpenClaw publish sync: resolved plugin sync candidates', {
 			pluginCount: pluginConfigs.length,
@@ -1339,6 +1653,27 @@ export class OpenClawAgentV2 implements INodeType {
 				.map((p) => p.pluginManifest?.id),
 			cloudIds: pluginConfigs.filter((p) => p.pluginId).map((p) => p.pluginId),
 		});
+		console.log('OpenClaw publish sync: resolved MCP Server sync candidates', {
+			serverCount: mcpServerConfigs.length,
+			serverNames: mcpServerConfigs.map((server) => server.serverName),
+			transports: mcpServerConfigs.map((server) => server.transport ?? '(openclaw-default)'),
+		});
+
+		if (mcpServerConfigs.length > 0) {
+			try {
+				const syncResult = syncMcpServerConfig({ mcpServerConfigs });
+				console.log('OpenClaw publish sync: MCP Server config sync completed before execute', {
+					changed: syncResult.changed,
+					configPath: syncResult.configPath,
+					synced: syncResult.synced,
+					skipped: syncResult.skipped.length > 0 ? syncResult.skipped : undefined,
+				});
+			} catch (mcpSyncErr) {
+				console.log('OpenClaw publish sync: MCP Server config sync failed before execute', {
+					error: getErrorMessage(mcpSyncErr),
+				});
+			}
+		}
 
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
 			try {
@@ -1583,6 +1918,7 @@ export class OpenClawAgentV2 implements INodeType {
 					envKeys: Object.keys(openClawEnv),
 					resolvedModel,
 					pluginCount: pluginConfigs.length,
+					mcpServerCount: mcpServerConfigs.length,
 					channelCount: channelConfigs.length,
 				});
 

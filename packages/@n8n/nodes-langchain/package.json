@@ -65,6 +65,7 @@
       "dist/nodes/agents/OpenClawAgent/channels/TelegramChannel/TelegramChannel.node.js",
       "dist/nodes/agents/OpenClawAgent/channels/WhatsAppChannel/WhatsAppChannel.node.js",
       "dist/nodes/agents/OpenClawAgent/models/OpenCodeFreeModel/OpenCodeFreeModel.node.js",
+      "dist/nodes/agents/OpenClawAgent/mcpServers/OpenClawMcpServer/OpenClawMcpServer.node.js",
       "dist/nodes/agents/OpenClawAgent/plugins/OpenClawPlugin/OpenClawPlugin.node.js",
       "dist/nodes/chains/ChainSummarization/ChainSummarization.node.js",
       "dist/nodes/chains/ChainLLM/ChainLlm.node.js",
